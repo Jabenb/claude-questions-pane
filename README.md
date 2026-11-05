@@ -64,7 +64,11 @@ The pane and the answers message are in English by default. The install asks for
 
 ## How it keeps the questions
 
-The pane lives in the session's memory. When a session starts with an empty pane (a restart, `--resume` or a fork), the mod rebuilds it from the chat history: the questions Claude asked, the answers you sent and Claude's replies. Not kept across a restart: unsent drafts, folded batches, hidden batches (they come back) and status changes made by hand. Per-session storage that keeps all of these is planned for the next version.
+Each session has its own file, `~/.claude/mods-data/questions/<session id>.jsonl` (under `$CLAUDE_CONFIG_DIR` when that is set): one line per change, so a restart or `--resume` brings the pane back as you left it, drafts, folded and hidden batches and statuses set by hand included. A file that grows long is rewritten as one snapshot.
+
+- **Fork.** Every row the pane leaves in the chat (Claude's `ask` and `reply` results, the answers message) ends with a short marker like `‹q:1a2b3c4d#7›`: whose file, and how far it had got. A fork finds the last marker in the history it copied and starts from the parent's file at that point, so it does not pick up what the parent did after the fork.
+- **Older sessions.** A session with no file yet (from before this version, or whose file is gone) is rebuilt from the chat history on its next start and gets its file then. Drafts, folds, hidden batches and statuses set by hand were never written down for those, so they are not brought back.
+- **Clean-up.** Once a day the mod deletes the files of sessions whose chat Claude Code has already removed (it keeps chats for `cleanupPeriodDays`, 30 days by default) and that were not touched for 30 days.
 
 ## Uninstall
 
