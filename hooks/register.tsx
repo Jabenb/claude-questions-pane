@@ -4,7 +4,9 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import type { Batch, Question } from '../types'
 import { languageOf, TEXTS } from './i18n'
 import type { Language, Texts } from './i18n'
-import { applyReplies, awaitingReply, batchText, composeAnswers, dropResolved, markSent, parseAsk, parseReplies, pending, rebuild, reopen, replyFooter, resolveByHand, replyReminder, setDraft } from './batch'
+import { applyReplies, awaitingReply, batchText, composeAnswers, parseAsk, parseReplies, pending, rebuild, replyFooter, replyReminder } from './batch'
+import { applyChange, COMPACT_AT, cutForFork, lastMarker, marker, parseJournal, replay, serialize } from './journal'
+import type { Change, Entry, PaneState } from './journal'
 
 const PANE = 'questions'
 const COMMAND = 'questions'
@@ -29,27 +31,84 @@ const openPane = ($: EngineInterface, texts: Texts, isFocused = false): Promise<
 /** What is typed stays out of state until the field loses focus: a state write per key redraws the pane under the cursor. */
 const typing = new Map<string, string>()
 
+/** This session's file, known from `session.start` on; null until then (and under a test that starts no session). */
+let journal: { sessionId: string; dir: string; path: string; text: string; seq: number; count: number } | null = null
+
+/** Changes run one at a time: each reads the state the one before it left, and appends after it. */
+let queue: Promise<unknown> = Promise.resolve()
+
+const serial = <T,>(work: () => Promise<T>): Promise<T> => {
+  const run = queue.then(work, work)
+  queue = run.catch(() => undefined)
+
+  return run
+}
+
+const readPane = async ($: EngineInterface): Promise<PaneState> => ({
+  batches: await read($, batches),
+  lastBatchNo: await read($, lastBatchNo),
+  collapsed: await read($, collapsed),
+})
+
+const writePane = async ($: EngineInterface, state: PaneState): Promise<void> => {
+  await update($, batches, () => state.batches)
+  await update($, lastBatchNo, () => state.lastBatchNo)
+  await update($, collapsed, () => state.collapsed)
+}
+
+/** Appends the change to the session's file, as one snapshot once the file has grown long; a failed write leaves the pane working from memory. */
+const persist = async ($: EngineInterface, change: Change, state: PaneState): Promise<number | null> => {
+  if (journal === null) {
+    return null
+  }
+
+  try {
+    const entry = { ...change, seq: journal.seq + 1, ts: await $.clock.now() } as Entry
+    const isCompacting = journal.count + 1 >= COMPACT_AT
+    const text = isCompacting ? serialize({ op: 'snapshot', state, seq: entry.seq, ts: entry.ts }) : journal.text + serialize(entry)
+    await $.fs.write(journal.path, text)
+    journal = { ...journal, text, seq: entry.seq, count: isCompacting ? 1 : journal.count + 1 }
+
+    return entry.seq
+  } catch {
+    return null
+  }
+}
+
+/** Applies one change to the pane and writes it down; resolves the new state and the marker for the chat ('' with no file). */
+const dispatch = ($: EngineInterface, change: Change): Promise<{ state: PaneState; mark: string }> =>
+  serial(async () => {
+    const state = applyChange(await readPane($), change)
+    await writePane($, state)
+    const seq = await persist($, change, state)
+
+    return { state, mark: seq === null || journal === null ? '' : marker(journal.sessionId, seq) }
+  })
+
 const commit = async ($: EngineInterface): Promise<void> => {
   const typed = [...typing]
 
-  if (typed.length === 0) {
-    return
+  for (const [id, text] of typed) {
+    const question = (await read($, batches)).flatMap(batch => batch.questions).find(one => one.id === id)
+
+    if (question !== undefined && question.draft !== text) {
+      await dispatch($, { op: 'draft', id, text })
+    }
   }
 
-  await update($, batches, current => typed.reduce((acc, [id, draft]) => setDraft(acc, id, draft), current))
   typed.forEach(([id, draft]) => typing.get(id) === draft && typing.delete(id))
 }
 
 const hide = async ($: EngineInterface, batchId: string): Promise<void> => {
   const list = await read($, batches)
   list.find(batch => batch.id === batchId)?.questions.forEach(question => typing.delete(question.id))
-  await update($, batches, current => current.filter(batch => batch.id !== batchId))
+  await dispatch($, { op: 'hide', batchId })
 }
 
 const pick = async ($: EngineInterface, question: Question, option: string): Promise<void> => {
   typing.delete(question.id)
   await commit($)
-  await update($, batches, current => setDraft(current, question.id, question.draft === option ? '' : option))
+  await dispatch($, { op: 'draft', id: question.id, text: question.draft === option ? '' : option })
 }
 
 const send = async ($: EngineInterface, language: Language, only?: string): Promise<void> => {
@@ -63,8 +122,9 @@ const send = async ($: EngineInterface, language: Language, only?: string): Prom
     return
   }
 
-  const sent = await update($, batches, current => markSent(current, only))
-  await $.prompt.submit({ text: `${text}\n\n${replyFooter(awaitingReply(sent), language)}`, asUser: true })
+  const { state, mark } = await dispatch($, only === undefined ? { op: 'sent' } : { op: 'sent', only })
+  const footer = replyFooter(awaitingReply(state.batches), language)
+  await $.prompt.submit({ text: `${text}\n\n${mark === '' ? footer : `${footer} ${mark}`}`, asUser: true })
 }
 
 /** Puts a batch, or one question of it, on the clipboard of the surface the press came from; typed drafts are kept first. */
@@ -82,20 +142,109 @@ const copyOut = async ($: EngineInterface, texts: Texts, surface: RenderSurface,
 
 const fold = async ($: EngineInterface, batchId: string): Promise<void> => {
   await commit($)
-  await update($, collapsed, current => (current.includes(batchId) ? current.filter(id => id !== batchId) : [...current, batchId]))
+  await dispatch($, { op: 'fold', batchId })
 }
 
-/** A fork or a resume starts with an empty state: the pane is told again from the transcript. */
-const restore = async ($: EngineInterface): Promise<void> => {
-  if ((await read($, batches)).length > 0 || (await read($, lastBatchNo)) > 0) {
+const readText = async ($: EngineInterface, path: string): Promise<string> => {
+  try {
+    return (await $.fs.exists(path)) ? String(await $.fs.read(path)) : ''
+  } catch {
+    return ''
+  }
+}
+
+const configDir = async ($: EngineInterface): Promise<string> => (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? ''}/.claude`
+
+/** The parent's file a fork's marker names, by its id prefix; the fork's own id never counts. */
+const parentText = async ($: EngineInterface, dir: string, prefix: string, ownId: string): Promise<string> => {
+  try {
+    const found = (await $.fs.list(dir)).find(entry => entry.kind === 'file' && entry.name.startsWith(prefix) && entry.name.endsWith('.jsonl') && !entry.name.startsWith(ownId))
+
+    return found === undefined ? '' : await readText($, `${dir}/${found.name}`)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Opens this session's file and puts the pane in state from the first source that has it: the session's own file
+ * (a restart or a resume), the state a running session already holds (an update of the mod), the parent's file cut
+ * where a fork's history ends, or the chat history itself (sessions from before the files, or a lost file).
+ */
+const open = async ($: EngineInterface): Promise<void> => {
+  const sessionId = await $.session.id()
+  const dir = `${await configDir($)}/mods-data/questions`
+  const path = `${dir}/${sessionId}.jsonl`
+  const own = await readText($, path)
+
+  if (own !== '') {
+    const entries = parseJournal(own)
+    journal = { sessionId, dir, path, text: own, seq: entries.at(-1)?.seq ?? 0, count: entries.length }
+    await writePane($, replay(entries))
+
     return
   }
 
-  const told = rebuild(await $.session.messages())
+  journal = { sessionId, dir, path, text: '', seq: 0, count: 0 }
+  const live = await readPane($)
+
+  if (live.batches.length > 0 || live.lastBatchNo > 0) {
+    await dispatch($, { op: 'snapshot', state: live })
+
+    return
+  }
+
+  const messages = await $.session.messages()
+  const seen = lastMarker(JSON.stringify(messages))
+
+  if (seen !== null && !sessionId.startsWith(seen.sessionId)) {
+    const cut = cutForFork(parseJournal(await parentText($, dir, seen.sessionId, sessionId)), seen.seq, await $.clock.now())
+
+    if (cut !== null) {
+      await dispatch($, { op: 'snapshot', state: replay(cut), from: seen })
+
+      return
+    }
+  }
+
+  const told = rebuild(messages)
 
   if (told.batches.length > 0) {
-    await update($, batches, () => told.batches)
-    await update($, lastBatchNo, () => told.lastBatchNo)
+    await dispatch($, { op: 'snapshot', state: { ...told, collapsed: [] } })
+  }
+}
+
+const DAY = 24 * 60 * 60 * 1000
+
+/**
+ * Once a day: deletes the files of sessions whose chat Claude Code has already removed (it keeps them
+ * `cleanupPeriodDays`, 30 by default) and that were not touched for 30 days. Nothing is deleted when the chats cannot be listed.
+ */
+const sweep = async ($: EngineInterface): Promise<void> => {
+  try {
+    const now = await $.clock.now()
+
+    if (journal === null || now - Number((await $.store.get('lastSweep')) ?? 0) < DAY) {
+      return
+    }
+
+    await $.store.set('lastSweep', now)
+    const listed = await $.process.run(['find', `${await configDir($)}/projects`, '-maxdepth', '2', '-name', '*.jsonl'])
+    const chats = new Set(listed.stdout.split('\n').map(line => line.trim().split('/').at(-1)?.replace(/\.jsonl$/, '') ?? '').filter(id => id !== ''))
+
+    if (listed.exitCode !== 0 || chats.size === 0) {
+      return
+    }
+
+    const stale = (await $.fs.list(journal.dir))
+      .filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl'))
+      .filter(entry => !chats.has(entry.name.replace(/\.jsonl$/, '')) && now - entry.mtimeMs > 30 * DAY)
+
+    if (stale.length > 0) {
+      await $.process.run(['rm', '-f', ...stale.map(entry => `${journal!.dir}/${entry.name}`)])
+    }
+  } catch {
+    return
   }
 }
 
@@ -117,6 +266,7 @@ const lookOf = (question: Question, texts: Texts): Look => {
 
 export const register: Register = (on, options) => {
   const language = languageOf(options.language)
+  journal = null
   const texts = TEXTS[language]
 
   on('session.start', async ($, e, next) => {
@@ -174,7 +324,8 @@ export const register: Register = (on, options) => {
       },
     })
 
-    await restore($)
+    await open($)
+    await sweep($)
 
     if ((await read($, batches)).some(batch => batch.questions.some(question => question.status !== 'resolved'))) {
       void openPane($, texts)
@@ -211,28 +362,22 @@ export const register: Register = (on, options) => {
       return { deny: 'No questions given: pass questions as [{ text, options? }].' }
     }
 
-    await update($, batches, current => [...current, batch])
-    await update($, lastBatchNo, last => Math.max(last, batchNo))
+    const { mark } = await dispatch($, { op: 'ask', batch })
     void openPane($, texts, true)
+    const shown = `${batch.questions.length} questions are shown in the Questions pane (ids ${batch.questions.map(q => q.id).join(', ')}). End your turn now and wait: the answers arrive as one message.`
 
-    return {
-      result: `${batch.questions.length} questions are shown in the Questions pane (ids ${batch.questions.map(q => q.id).join(', ')}). End your turn now and wait: the answers arrive as one message.`,
-    }
+    return { result: mark === '' ? shown : `${shown} ${mark}` }
   })
 
   on('tool.call', { tool: REPLY }, async ($, e) => {
     const replies = parseReplies(e as unknown as Record<string, unknown>)
-    let unknown: string[] = []
-    const updated = await update($, batches, current => {
-      const applied = applyReplies(current, replies)
-      unknown = applied.unknown
-
-      return applied.batches
-    })
-    const waiting = awaitingReply(updated)
+    const { unknown } = applyReplies(await read($, batches), replies)
+    const { state, mark } = await dispatch($, { op: 'reply', replies })
+    const waiting = awaitingReply(state.batches)
     const shown = unknown.length === 0 ? `${replies.length} replies shown in the pane.` : `Shown; no question with ids ${unknown.join(', ')}.`
+    const result = waiting.length === 0 ? shown : `${shown} Still without your reply: ${waiting.join(', ')} — reply to each of them too.`
 
-    return { result: waiting.length === 0 ? shown : `${shown} Still without your reply: ${waiting.join(', ')} — reply to each of them too.` }
+    return { result: mark === '' ? result : `${result} ${mark}` }
   })
 
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
@@ -326,7 +471,7 @@ export const register: Register = (on, options) => {
                     <Text size="footnote" weight="semibold" color={look.color}>{`${look.mark} Q${question.n}`}</Text>
                     <Box flexDirection="row" alignItems="center" columnGap="sm">
                       {question.status === 'resolved' ? (
-                        <Button key={`reopen-${question.id}`} plain dimColor label={texts.reopen} onPress={() => void update($, batches, current => reopen(current, question.id))} />
+                        <Button key={`reopen-${question.id}`} plain dimColor label={texts.reopen} onPress={() => void dispatch($, { op: 'reopen', id: question.id })} />
                       ) : isOpen && question.thread.length > 0 ? (
                         <Button
                           key={`resolve-${question.id}`}
@@ -335,7 +480,7 @@ export const register: Register = (on, options) => {
                           label={texts.resolveByHand}
                           onPress={() => {
                             typing.delete(question.id)
-                            void update($, batches, current => resolveByHand(current, question.id))
+                            void dispatch($, { op: 'resolve', id: question.id })
                           }}
                         />
                       ) : (
@@ -390,7 +535,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap="sm" paddingTop="sm">
           <Text size="footnote" dimColor>{texts.footer(waiting, resolved, all.length)}</Text>
           <Box flexDirection="row" columnGap="sm">
-            {resolved > 0 && <Button key="clear" variant="secondary" dimColor label={texts.clearResolved} onPress={() => void update($, batches, dropResolved)} />}
+            {resolved > 0 && <Button key="clear" variant="secondary" dimColor label={texts.clearResolved} onPress={() => void dispatch($, { op: 'clear' })} />}
             <Button key="send" variant="primary" dimColor={waiting === 0} label={texts.sendAll(waiting)} onPress={() => void send($, language)} />
           </Box>
         </Box>

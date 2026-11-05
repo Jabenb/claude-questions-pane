@@ -3,6 +3,8 @@ import { expect, test } from 'claude-code/testing'
 import { applyReplies, composeAnswers, markSent, parseAsk, rebuild, setDraft } from '../hooks/batch'
 import type { TranscriptMessage } from '../hooks/batch'
 import { languageOf } from '../hooks/i18n'
+import { cutForFork, lastMarker, parseJournal, replay, serialize } from '../hooks/journal'
+import type { Change, Entry } from '../hooks/journal'
 
 const RU = { options: { language: 'ru' } }
 
@@ -219,6 +221,66 @@ const started = (on: Parameters<Parameters<typeof test>[1]>[1]): void => {
   on('tool.register', () => ({ value: undefined }))
 }
 
+const DIR = '/home/u/.claude/mods-data/questions'
+const OWN = 'aaaaaaaa-1111-2222-3333-444444444444'
+const DAY = 24 * 60 * 60 * 1000
+
+type Disk = { files: Map<string, string>; mtimes: Map<string, number>; runs: string[][]; store: Map<string, unknown>; chats: string[]; now: number; isWritable: boolean }
+
+/** The session's id, clock, files, store and host commands, held in memory. */
+const disk = (on: Parameters<Parameters<typeof test>[1]>[1], sessionId = OWN, files: Record<string, string> = {}): Disk => {
+  const held: Disk = { files: new Map(Object.entries(files)), mtimes: new Map(), runs: [], store: new Map(), chats: [OWN], now: 100 * DAY, isWritable: true }
+  on('session.id', () => ({ value: sessionId }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('clock.now', () => ({ value: held.now }))
+  on('fs.exists', (_, e) => ({ value: held.files.has(e.path) }))
+  on('fs.read', (_, e) => {
+    if (!held.files.has(e.path)) {
+      throw new Error(`ENOENT ${e.path}`)
+    }
+
+    return { value: held.files.get(e.path)! }
+  })
+  on('fs.write', (_, e) => {
+    if (!held.isWritable) {
+      throw new Error('EACCES')
+    }
+
+    held.files.set(e.path, e.text)
+
+    return { value: undefined }
+  })
+  on('fs.list', (_, e) => ({
+    value: [...held.files.keys()]
+      .filter(path => path.startsWith(`${e.path}/`))
+      .map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: held.files.get(path)!.length, mtimeMs: held.mtimes.get(path) ?? held.now, isLink: false })),
+  }))
+  on('store.get', (_, e) => ({ value: held.store.get(e.key) }))
+  on('store.set', (_, e) => {
+    held.store.set(e.key, e.value)
+
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    held.runs.push([...e.argv])
+
+    if (e.argv[0] === 'rm') {
+      e.argv.slice(2).forEach(path => held.files.delete(path))
+    }
+
+    const stdout = e.argv[0] === 'find' ? held.chats.map(id => `/home/u/.claude/projects/-w/${id}.jsonl`).join('\n') : ''
+
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+
+  return held
+}
+
+const journalOf = (changes: (Change & { ts?: number })[], firstSeq = 1): string =>
+  changes.map((change, index) => serialize({ ts: 10 * (index + 1), ...change, seq: firstSeq + index } as Entry)).join('')
+
+const lines = (text: string | undefined): Entry[] => parseJournal(text ?? '')
+
 const asked = (text: string, input: Record<string, unknown> = ASK): TranscriptMessage => ({
   role: 'assistant',
   text: '',
@@ -270,6 +332,7 @@ test('a refused ask is skipped and an ask without ids in its result takes the ne
 test('a session started with an empty pane restores it from the transcript and numbers on from there', RU, async ($, on) => {
   engine(on, [])
   started(on)
+  const held = disk(on)
   on('session.messages', () => ({ value: TRANSCRIPT }))
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
@@ -280,6 +343,7 @@ test('a session started with an empty pane restores it from the transcript and n
 
   const next = await $.tool.call(ASK)
   expect(String(next.result)).toMatch(/ids 4\.1, 4\.2/)
+  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => entry.op)).toEqual(['snapshot', 'ask'])
   await ui.unmount()
 })
 
@@ -287,6 +351,7 @@ test('a session started with questions in its state does not read the transcript
   let reads = 0
   engine(on, [])
   started(on)
+  const held = disk(on)
   on('session.messages', () => {
     reads += 1
 
@@ -297,6 +362,7 @@ test('a session started with questions in its state does not read the transcript
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(reads).toBe(0)
+  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => entry.op)).toEqual(['snapshot'])
   expect(await ui.find({ key: 'a-3.1' })).toBe(undefined)
   expect((await ui.find({ key: 'a-1.1' }))?.type).toBe('Input')
   await ui.unmount()
@@ -471,4 +537,221 @@ test('a question or a whole batch is copied with its thread, options and drafts'
   ])
   expect(toasts).toEqual(['Скопировано', 'Скопировано', 'Не скопировалось: no-clipboard'])
   await ui.unmount()
+})
+
+test('a journal replays to the pane it wrote, a broken line skipped', async () => {
+  const batch = parseAsk(ASK, 1, 'ru')!
+  const second = { ...parseAsk(ASK, 2, 'ru')!, title: 'Второй' }
+  const text = journalOf([
+    { op: 'ask', batch },
+    { op: 'ask', batch: second },
+    { op: 'draft', id: '1.1', text: 'В нашей БД' },
+    { op: 'sent', only: '1' },
+    { op: 'reply', replies: [{ id: '1.1', text: 'Какая CRM?', isResolved: false, options: ['HubSpot'] }] },
+    { op: 'draft', id: '1.2', text: 'черн' },
+    { op: 'fold', batchId: '1' },
+    { op: 'hide', batchId: '2' },
+  ])
+  const state = replay(parseJournal(`${text}{"op":"draft","seq":`))
+
+  expect(state.lastBatchNo).toBe(2)
+  expect(state.batches.map(one => one.id)).toEqual(['1'])
+  expect(state.collapsed).toEqual(['1'])
+  expect(state.batches[0]?.questions.map(question => [question.status, question.draft, question.options])).toEqual([
+    ['open', '', ['HubSpot']],
+    ['open', 'черн', []],
+  ])
+})
+
+test('a fork takes the parent up to its marker and the quiet changes before the fork', async () => {
+  const entries = parseJournal(
+    journalOf([
+      { op: 'ask', batch: parseAsk(ASK, 1, 'ru')!, ts: 10 },
+      { op: 'draft', id: '1.1', text: 'В нашей БД', ts: 20 },
+      { op: 'sent', ts: 30 },
+      { op: 'reply', replies: [{ id: '1.1', text: 'Принял', isResolved: true, options: [] }], ts: 40 },
+      { op: 'hide', batchId: '1', ts: 50 },
+    ]),
+  )
+  const seqs = (cut: Entry[] | null): number[] | null => cut?.map(entry => entry.seq) ?? null
+
+  expect(seqs(cutForFork(entries, 1, 100))).toEqual([1, 2])
+  expect(seqs(cutForFork(entries, 1, 15))).toEqual([1])
+  expect(seqs(cutForFork(entries, 4, 100))).toEqual([1, 2, 3, 4, 5])
+  expect(seqs(cutForFork(entries, 4, 45))).toEqual([1, 2, 3, 4])
+  expect(cutForFork(parseJournal(journalOf([{ op: 'snapshot', state: replay(entries) }], 5)), 3, 100)).toBe(null)
+  expect(lastMarker('a ‹q:pppppppp#1› b ‹q:qqqqqqqq#7› c')).toEqual({ sessionId: 'qqqqqqqq', seq: 7 })
+  expect(lastMarker('none')).toBe(null)
+})
+
+test('every change is written to the session file and marks what reaches the chat', RU, async ($, on) => {
+  const submitted: string[] = []
+  engine(on, submitted)
+  started(on)
+  on('session.messages', () => ({ value: [] }))
+  const held = disk(on)
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  expect(held.files.has(`${DIR}/${OWN}.jsonl`)).toBe(false)
+
+  const asked = await $.tool.call(ASK)
+  expect(String(asked.result)).toMatch(/ids 1\.1, 1\.2\)\..* ‹q:aaaaaaaa#1›$/)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'o-1.1-0' })
+  await ui.press({ key: 'send-1' })
+  expect(submitted[0]).toMatch(/_Claude: .*_ ‹q:aaaaaaaa#3›$/)
+
+  const replied = await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Принял' }] })
+  expect(String(replied.result)).toBe('1 replies shown in the pane. ‹q:aaaaaaaa#4›')
+  await ui.press({ key: 'fold-1' })
+  await ui.press({ key: 'hide-1' })
+
+  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => `${entry.seq}:${entry.op}`)).toEqual(['1:ask', '2:draft', '3:sent', '4:reply', '5:fold', '6:hide'])
+  await ui.unmount()
+})
+
+test('a session reopened with its file gets back hidden batches, folds, drafts and statuses set by hand', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  let reads = 0
+  on('session.messages', () => {
+    reads += 1
+
+    return { value: TRANSCRIPT }
+  })
+  disk(on, OWN, {
+    [`${DIR}/${OWN}.jsonl`]: journalOf([
+      { op: 'ask', batch: parseAsk(ASK, 1, 'ru')! },
+      { op: 'ask', batch: { ...parseAsk(ASK, 2, 'ru')!, title: 'Второй' } },
+      { op: 'draft', id: '1.2', text: 'черн' },
+      { op: 'hide', batchId: '1' },
+      { op: 'draft', id: '2.1', text: 'В нашей БД' },
+      { op: 'sent' },
+      { op: 'reply', replies: [{ id: '2.1', text: 'Принял', isResolved: true, options: [] }] },
+      { op: 'reopen', id: '2.1' },
+      { op: 'resolve', id: '2.1' },
+    ]),
+  })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(reads).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Checkout flow/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('✓ Q1')
+
+  const next = await $.tool.call(ASK)
+  expect(String(next.result)).toMatch(/ids 3\.1, 3\.2\)\..* ‹q:aaaaaaaa#10›$/)
+  await ui.unmount()
+})
+
+test('a fork starts from the parent file cut at the marker its history ends on', RU, async ($, on) => {
+  const parent = 'pppppppp-1111-2222-3333-444444444444'
+  const fork = 'ffffffff-1111-2222-3333-444444444444'
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [asked('2 questions are shown (ids 1.1, 1.2). ‹q:pppppppp#1›')] }))
+  const held = disk(on, fork, {
+    [`${DIR}/${parent}.jsonl`]: journalOf([
+      { op: 'ask', batch: parseAsk(ASK, 1, 'ru')!, ts: 10 },
+      { op: 'draft', id: '1.1', text: 'В нашей БД', ts: 20 },
+      { op: 'sent', ts: 30 },
+    ]),
+  })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('● Q1')
+  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('✓ В нашей БД')
+
+  const own = lines(held.files.get(`${DIR}/${fork}.jsonl`))
+  expect(own.map(entry => entry.op)).toEqual(['snapshot'])
+  expect(own[0]?.op === 'snapshot' && own[0].from).toEqual({ sessionId: 'pppppppp', seq: 1 })
+  expect(lines(held.files.get(`${DIR}/${parent}.jsonl`))).toHaveLength(3)
+  await ui.unmount()
+})
+
+test('a fork whose parent file is gone is told from its history', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [asked('shown (ids 3.1, 3.2). ‹q:pppppppp#1›')] }))
+  const held = disk(on, 'ffffffff-1111-2222-3333-444444444444')
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
+  expect([...held.files.keys()]).toEqual([`${DIR}/ffffffff-1111-2222-3333-444444444444.jsonl`])
+  await ui.unmount()
+})
+
+test('a session with nothing to restore makes no file until its first change', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'привет', toolUses: [] }] }))
+  const held = disk(on)
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  expect([...held.files.keys()]).toEqual([])
+})
+
+test('a long journal is rewritten as one snapshot and keeps counting', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  const drafts: Change[] = Array.from({ length: 498 }, (_, index) => ({ op: 'draft', id: '1.2', text: `v${index}` }))
+  const held = disk(on, OWN, { [`${DIR}/${OWN}.jsonl`]: journalOf([{ op: 'ask', batch: parseAsk(ASK, 1, 'ru')! }, ...drafts]) })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const asked = await $.tool.call(ASK)
+  expect(String(asked.result)).toMatch(/‹q:aaaaaaaa#500›$/)
+
+  const compacted = lines(held.files.get(`${DIR}/${OWN}.jsonl`))
+  expect(compacted.map(entry => `${entry.seq}:${entry.op}`)).toEqual(['500:snapshot'])
+  expect(replay(compacted).batches.map(batch => batch.id)).toEqual(['1', '2'])
+  expect(replay(compacted).batches[0]?.questions[1]?.draft).toBe('v497')
+
+  await $.tool.call({ ...ASK, title: 'Ещё' })
+  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => `${entry.seq}:${entry.op}`)).toEqual(['500:snapshot', '501:ask'])
+})
+
+test('a pane whose file cannot be written keeps working from memory', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [] }))
+  const held = disk(on)
+  held.isWritable = false
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const asked = await $.tool.call(ASK)
+  expect(String(asked.result)).toMatch(/wait: the answers arrive as one message\.$/)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
+  await ui.unmount()
+})
+
+test('once a day the files of chats already removed and untouched for 30 days are deleted', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [] }))
+  const gone = `${DIR}/dddddddd-0000-0000-0000-000000000000.jsonl`
+  const fresh = `${DIR}/eeeeeeee-0000-0000-0000-000000000000.jsonl`
+  const kept = `${DIR}/kkkkkkkk-0000-0000-0000-000000000000.jsonl`
+  const held = disk(on, OWN, { [gone]: '', [fresh]: '', [kept]: '' })
+  held.chats = [OWN, 'kkkkkkkk-0000-0000-0000-000000000000']
+  held.mtimes.set(gone, held.now - 31 * DAY)
+  held.mtimes.set(fresh, held.now - DAY)
+  held.mtimes.set(kept, held.now - 40 * DAY)
+
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  expect(held.runs.filter(argv => argv[0] === 'rm')).toEqual([['rm', '-f', gone]])
+  expect([...held.files.keys()].sort()).toEqual([fresh, kept].sort())
+
+  held.files.set(gone, '')
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  expect(held.runs.filter(argv => argv[0] === 'find')).toHaveLength(1)
+
+  held.now += DAY
+  held.chats = []
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  expect(held.runs.filter(argv => argv[0] === 'find')).toHaveLength(2)
+  expect(held.files.has(gone)).toBe(true)
 })

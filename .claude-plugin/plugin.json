@@ -1,6 +1,6 @@
 {
   "name": "questions",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Questions pane: Claude posts its clarifying questions in a side pane, you answer each one in its own field and send them back with every answer under its question",
   "author": { "name": "jabenb" },
   "homepage": "https://github.com/jabenb/claude-questions-pane",
