@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Batch, Question } from '../types'
 import { languageOf, TEXTS } from './i18n'
 import type { Language, Texts } from './i18n'
-import { applyReplies, awaitingReply, composeAnswers, dropResolved, markSent, parseAsk, parseReplies, pending, rebuild, reopen, replyFooter, resolveByHand, replyReminder, setDraft } from './batch'
+import { applyReplies, awaitingReply, batchText, composeAnswers, dropResolved, markSent, parseAsk, parseReplies, pending, rebuild, reopen, replyFooter, resolveByHand, replyReminder, setDraft } from './batch'
 
 const PANE = 'questions'
 const COMMAND = 'questions'
@@ -20,7 +20,7 @@ const collapsed = atom({ plugin: 'questions', key: 'collapsed' } as const, [])
 const GUIDE = [
   '# Questions pane',
   `When you need the user to decide more than two things (implementation questions, open points of a feature, clarifications), do not write them as a numbered list in chat: call ${ASK} with all of them, each with its options when there are obvious ones, then end your turn with one short line saying the questions are in the pane. Keep each question self-contained: it is read alone, next to its own answer field.`,
-  `The user's answers arrive as one message where every answer sits under its question, tagged with its id like [1.3]. Reply to every answered id with ${REPLY} before the turn ends, not only the ones you discuss in chat: a question stays unresolved in the pane until it gets your reply. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided, or when your reply asks the user something back. In chat, never refer to a question by its bare number: open each point with the question's short title and quote the user's answer, e.g. "**Q3 · Where to keep the lead** — you: «in our DB» → …".`,
+  `The user's answers arrive as one message where every answer sits under its question, tagged with its id like [1.3]. Reply to every answered id with ${REPLY} before the turn ends, not only the ones you discuss in chat: a question stays unresolved in the pane until it gets your reply. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided, or when your reply asks the user something back; when that follow-up has obvious answers, pass them as the reply's options (they replace the question's old buttons). In chat, never refer to a question by its bare number: open each point with the question's short title and quote the user's answer, e.g. "**Q3 · Where to keep the lead** — you: «in our DB» → …".`,
 ].join('\n\n')
 
 const openPane = ($: EngineInterface, texts: Texts, isFocused = false): Promise<unknown> =>
@@ -65,6 +65,19 @@ const send = async ($: EngineInterface, language: Language, only?: string): Prom
 
   const sent = await update($, batches, current => markSent(current, only))
   await $.prompt.submit({ text: `${text}\n\n${replyFooter(awaitingReply(sent), language)}`, asUser: true })
+}
+
+/** Puts a batch, or one question of it, on the clipboard of the surface the press came from; typed drafts are kept first. */
+const copyOut = async ($: EngineInterface, texts: Texts, surface: RenderSurface, batchId: string, questionId?: string): Promise<void> => {
+  await commit($)
+  const batch = (await read($, batches)).find(one => one.id === batchId)
+
+  if (batch === undefined) {
+    return
+  }
+
+  const copied = await $.ui.copy({ text: batchText(batch, texts, questionId), surface })
+  $.ui.toast(copied.isCopied ? texts.copied : texts.copyFailed(copied.reason), { timeoutMs: 2000 })
 }
 
 const fold = async ($: EngineInterface, batchId: string): Promise<void> => {
@@ -147,6 +160,11 @@ export const register: Register = (on, options) => {
                 id: { type: 'string' },
                 text: { type: 'string', description: 'Your reply to the answer, short' },
                 resolved: { type: 'boolean', description: 'true (default) only when the answer is a final decision; false when the user leaves the point open or undecided, or when your reply asks the user something back' },
+                options: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'With resolved: false, ready answers to your follow-up; they replace the question\'s buttons (none given: the old ones are dropped)',
+                },
               },
               required: ['id', 'text'],
             },
@@ -274,7 +292,8 @@ export const register: Register = (on, options) => {
                   <Button key={`fold-${batch.id}`} plain label={isFolded ? '▸' : '▾'} onPress={() => void fold($, batch.id)} />
                   <Text size="heading" weight="semibold">{batch.title}</Text>
                 </Box>
-                <Box flexDirection="row" columnGap="sm">
+                <Box flexDirection="row" alignItems="center" columnGap="sm">
+                  <Button key={`copy-${batch.id}`} plain dimColor label="⧉" onPress={press => void copyOut($, texts, press.surface, batch.id)} />
                   {batchWaiting > 0 && (
                     <Button key={`send-${batch.id}`} variant="primary" label={texts.sendBatch(batchWaiting)} onPress={() => void send($, language, batch.id)} />
                   )}
@@ -305,22 +324,25 @@ export const register: Register = (on, options) => {
                 >
                   <Box flexDirection="row" justifyContent="space-between" columnGap="sm">
                     <Text size="footnote" weight="semibold" color={look.color}>{`${look.mark} Q${question.n}`}</Text>
-                    {question.status === 'resolved' ? (
-                      <Button key={`reopen-${question.id}`} plain dimColor label={texts.reopen} onPress={() => void update($, batches, current => reopen(current, question.id))} />
-                    ) : isOpen && question.thread.length > 0 ? (
-                      <Button
-                        key={`resolve-${question.id}`}
-                        plain
-                        dimColor
-                        label={texts.resolveByHand}
-                        onPress={() => {
-                          typing.delete(question.id)
-                          void update($, batches, current => resolveByHand(current, question.id))
-                        }}
-                      />
-                    ) : (
-                      <Text size="footnote" dimColor>{look.hint}</Text>
-                    )}
+                    <Box flexDirection="row" alignItems="center" columnGap="sm">
+                      {question.status === 'resolved' ? (
+                        <Button key={`reopen-${question.id}`} plain dimColor label={texts.reopen} onPress={() => void update($, batches, current => reopen(current, question.id))} />
+                      ) : isOpen && question.thread.length > 0 ? (
+                        <Button
+                          key={`resolve-${question.id}`}
+                          plain
+                          dimColor
+                          label={texts.resolveByHand}
+                          onPress={() => {
+                            typing.delete(question.id)
+                            void update($, batches, current => resolveByHand(current, question.id))
+                          }}
+                        />
+                      ) : (
+                        <Text size="footnote" dimColor>{look.hint}</Text>
+                      )}
+                      <Button key={`copy-${question.id}`} plain dimColor label="⧉" onPress={press => void copyOut($, texts, press.surface, batch.id, question.id)} />
+                    </Box>
                   </Box>
                   <Text weight={isOpen ? 'medium' : 'regular'} dimColor={question.status === 'resolved'}>{question.text}</Text>
                   {question.thread.length > 0 && (

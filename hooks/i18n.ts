@@ -25,6 +25,10 @@ export type Texts = {
   answer: string
   noInput: string
   footer: (waiting: number, resolved: number, total: number) => string
+  copied: string
+  copyFailed: (reason: string) => string
+  optionsLabel: string
+  draftLabel: string
 }
 
 export const TEXTS: Record<Language, Texts> = {
@@ -53,6 +57,10 @@ export const TEXTS: Record<Language, Texts> = {
     answer: 'Your answer…',
     noInput: 'No input fields on this device: answer from a computer.',
     footer: (waiting, resolved, total) => `ready to send: ${waiting} · resolved ${resolved}/${total}`,
+    copied: 'Copied',
+    copyFailed: reason => `Not copied: ${reason}`,
+    optionsLabel: 'Options',
+    draftLabel: 'Draft',
   },
   ru: {
     paneTitle: 'Вопросы',
@@ -79,6 +87,10 @@ export const TEXTS: Record<Language, Texts> = {
     answer: 'Твой ответ…',
     noInput: 'На этом устройстве поля ввода нет: отвечай с компьютера.',
     footer: (waiting, resolved, total) => `готово к отправке: ${waiting} · решено ${resolved}/${total}`,
+    copied: 'Скопировано',
+    copyFailed: reason => `Не скопировалось: ${reason}`,
+    optionsLabel: 'Варианты',
+    draftLabel: 'Черновик',
   },
 }
 

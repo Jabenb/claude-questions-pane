@@ -225,7 +225,7 @@ const asked = (text: string, input: Record<string, unknown> = ASK): TranscriptMe
   toolUses: [{ tool: 'mcp__questions__ask', input, text }],
 })
 
-const replied = (replies: { id: string; text: string; resolved?: boolean }[]): TranscriptMessage => ({
+const replied = (replies: { id: string; text: string; resolved?: boolean; options?: string[] }[]): TranscriptMessage => ({
   role: 'assistant',
   text: '',
   toolUses: [{ tool: 'mcp__questions__reply', input: { replies }, text: 'ok' }],
@@ -402,4 +402,73 @@ test('the transcript is read whatever language its answers were sent in', async 
   expect(told.batches[0]?.questions[1]?.status).toBe('open')
   expect(parseAsk({ questions: ['q'] }, 5)?.title).toBe('Questions 5')
   expect(languageOf('de')).toBe('en')
+})
+
+test('an unresolved reply brings the options of its follow-up, a resolved one keeps the old', async () => {
+  const sent = markSent(setDraft(setDraft([parseAsk(ASK, 1)!], '1.1', 'В нашей БД'), '1.2', 'да'))
+  const { batches } = applyReplies(sent, [
+    { id: '1.1', text: 'Какая CRM?', isResolved: false, options: ['HubSpot', 'Salesforce'] },
+    { id: '1.2', text: 'Сколько попыток?', isResolved: false, options: [] },
+  ])
+  const resolved = applyReplies(sent, [{ id: '1.1', text: 'Принял', isResolved: true, options: ['x'] }]).batches
+
+  expect(batches[0]?.questions.map(question => question.options)).toEqual([['HubSpot', 'Salesforce'], []])
+  expect(resolved[0]?.questions[0]?.options).toEqual(['В нашей БД', 'Только в CRM'])
+  expect(rebuild([asked('shown (ids 1.1, 1.2)'), replied([{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot'] }])]).batches[0]?.questions[0]?.options).toEqual(['HubSpot'])
+})
+
+test('the buttons of a question follow Claude\'s follow-up', RU, async ($, on) => {
+  engine(on, [])
+  await $.tool.call(ASK)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'o-1.1-0' })
+  await ui.press({ key: 'send-1' })
+  await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot', 'Salesforce', 'Своя'] }] })
+
+  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('HubSpot')
+  expect((await ui.find({ type: 'Button', key: 'o-1.1-2' }))?.props.label).toBe('Своя')
+
+  await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'А зачем?', resolved: false }] })
+  expect(await ui.find({ key: 'o-1.1-0' })).toBe(undefined)
+  expect((await ui.find({ key: 'a-1.1' }))?.type).toBe('Input')
+  await ui.unmount()
+})
+
+test('a question or a whole batch is copied with its thread, options and drafts', RU, async ($, on) => {
+  const copied: string[] = []
+  const toasts: string[] = []
+  let isCopying = true
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+
+    return { value: isCopying ? { isCopied: true } : { isCopied: false, reason: 'no-clipboard' } }
+  })
+  await $.tool.call(ASK)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'o-1.1-0' })
+  await ui.press({ key: 'send-1' })
+  await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot'] }] })
+  await ui.input({ key: 'a-1.2', text: 'черн', kind: 'change' })
+
+  await ui.press({ key: 'copy-1.1' })
+  await ui.press({ key: 'copy-1' })
+  isCopying = false
+  await ui.press({ key: 'copy-1.2' })
+
+  expect(copied).toEqual([
+    '«Checkout flow»\n\n[1.1] Q1. Где хранить lead?\nТы: В нашей БД\nClaude: Какая CRM?\nВарианты: HubSpot',
+    '«Checkout flow»\n\n[1.1] Q1. Где хранить lead?\nТы: В нашей БД\nClaude: Какая CRM?\nВарианты: HubSpot\n\n[1.2] Q2. Нужен ли retry?\nЧерновик: черн',
+    '«Checkout flow»\n\n[1.2] Q2. Нужен ли retry?\nЧерновик: черн',
+  ])
+  expect(toasts).toEqual(['Скопировано', 'Скопировано', 'Не скопировалось: no-clipboard'])
+  await ui.unmount()
 })
