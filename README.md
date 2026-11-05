@@ -1,5 +1,7 @@
 # Questions pane for Claude Code
 
+English | [Русский](README.ru.md)
+
 When Claude has several things for you to decide (open points of a feature, implementation choices, clarifications), it usually writes them as a numbered list. You then answer "1 — yes, 3 — later" and lose track of which answer goes with which question, and of what Claude said back.
 
 This mod moves those questions into a side pane. Claude posts them there, you answer each one in its own field or with a ready option, and the pane sends all answers back as one message, each under its question. Claude then replies to every answer, and its reply shows under that question, marked as resolved or still open.
@@ -12,7 +14,7 @@ At the prompt of a Claude Code terminal session:
 /plugin install questions --marketplace jabenb/claude-questions-pane
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user: every project; project: this repository, shared through `.claude/settings.json`; local: this repository, only for you).
+Answer `y` to add the marketplace, then pick a scope (see below).
 
 From a shell:
 
@@ -21,6 +23,30 @@ claude plugin install questions --marketplace jabenb/claude-questions-pane
 ```
 
 In the Claude desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jabenb/claude-questions-pane`, then **Add plugin**.
+
+### Globally or for one project
+
+The scope decides where the mod runs:
+
+| Scope | Runs in | Written to |
+|---|---|---|
+| `user` (default) | every project | `~/.claude/settings.json` |
+| `project` | this repository, for everyone who clones it | `<project>/.claude/settings.json`, committed |
+| `local` | this repository, only for you | `<project>/.claude/settings.local.json`, not committed |
+
+Globally:
+
+```bash
+claude plugin install questions --marketplace jabenb/claude-questions-pane --scope user
+```
+
+For one project (run it in the project's folder):
+
+```bash
+claude plugin install questions --marketplace jabenb/claude-questions-pane --scope project
+```
+
+If you already load the mod from a folder (`--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`), remove that first: otherwise it loads twice.
 
 ## Language
 
