@@ -1,0 +1,20 @@
+{
+  "name": "questions",
+  "version": "0.2.0",
+  "description": "Questions pane: Claude posts its clarifying questions in a side pane, you answer each one in its own field and send them back with every answer under its question",
+  "author": { "name": "jabenb" },
+  "homepage": "https://github.com/jabenb/claude-questions-pane",
+  "repository": "https://github.com/jabenb/claude-questions-pane",
+  "license": "MIT",
+  "keywords": ["questions", "pane", "clarifications", "mod"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the pane and of the answers message it sends: en or ru.",
+      "default": "en",
+      "options": ["en", "ru"]
+    }
+  }
+}

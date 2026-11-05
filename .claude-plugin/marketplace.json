@@ -1,0 +1,11 @@
+{
+  "name": "claude-questions-pane",
+  "owner": { "name": "jabenb" },
+  "plugins": [
+    {
+      "name": "questions",
+      "source": "./",
+      "description": "Questions pane: answer Claude's clarifying questions one by one, each in its own field"
+    }
+  ]
+}

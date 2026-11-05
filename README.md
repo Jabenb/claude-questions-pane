@@ -1,0 +1,50 @@
+# Questions pane for Claude Code
+
+When Claude has several things for you to decide (open points of a feature, implementation choices, clarifications), it usually writes them as a numbered list. You then answer "1 — yes, 3 — later" and lose track of which answer goes with which question, and of what Claude said back.
+
+This mod moves those questions into a side pane. Claude posts them there, you answer each one in its own field or with a ready option, and the pane sends all answers back as one message, each under its question. Claude then replies to every answer, and its reply shows under that question, marked as resolved or still open.
+
+## Install
+
+At the prompt of a Claude Code terminal session:
+
+```
+/plugin install questions --marketplace jabenb/claude-questions-pane
+```
+
+Answer `y` to add the marketplace, then pick a scope (user: every project; project: this repository, shared through `.claude/settings.json`; local: this repository, only for you).
+
+From a shell:
+
+```bash
+claude plugin install questions --marketplace jabenb/claude-questions-pane
+```
+
+In the Claude desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jabenb/claude-questions-pane`, then **Add plugin**.
+
+## Language
+
+The pane and the answers message are in English by default. The install asks for the `language` option (`en` or `ru`); change it later in `/config` or under `/plugin`.
+
+## Use
+
+- Ask Claude for its questions, e.g. "look at this feature and prepare your questions". Claude calls the pane's `ask` tool instead of writing a list, and the pane opens.
+- Open the pane any time with `/questions` or the ❓ button in the footer.
+- Each question has its own field; ready options are buttons (press again to clear). What you type is saved when you leave the field.
+- **Send** sends one batch, **Send all answers** sends every answered question. Each answer is quoted under its question with an id like `[2.1]`.
+- Claude answers each id with the `reply` tool: ✓ resolved, or open again when it asks you something back. **↺ reopen** and **✓ resolved** let you change that by hand.
+- **Hide** removes a batch from the pane, **Clear resolved** removes batches where everything is resolved. Neither touches the chat.
+
+## How it keeps the questions
+
+The pane lives in the session's memory. When a session starts with an empty pane (a restart, `--resume` or a fork), the mod rebuilds it from the chat history: the questions Claude asked, the answers you sent and Claude's replies. Not kept across a restart: unsent drafts, folded batches, hidden batches (they come back) and status changes made by hand. Per-session storage that keeps all of these is planned for the next version.
+
+## Uninstall
+
+```
+/plugin uninstall questions
+```
+
+## License
+
+MIT
