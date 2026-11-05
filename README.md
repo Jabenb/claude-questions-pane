@@ -32,7 +32,8 @@ The pane and the answers message are in English by default. The install asks for
 - Open the pane any time with `/questions` or the ❓ button in the footer.
 - Each question has its own field; ready options are buttons (press again to clear). What you type is saved when you leave the field.
 - **Send** sends one batch, **Send all answers** sends every answered question. Each answer is quoted under its question with an id like `[2.1]`.
-- Claude answers each id with the `reply` tool: ✓ resolved, or open again when it asks you something back. **↺ reopen** and **✓ resolved** let you change that by hand.
+- Claude answers each id with the `reply` tool: ✓ resolved, or open again when it asks you something back. A follow-up brings its own ready options, in place of the question's old buttons. **↺ reopen** and **✓ resolved** let you change that by hand.
+- **⧉** next to a batch copies the whole batch, next to a question copies that question: its text, the whole exchange under it, the options still offered and an unsent draft.
 - **Hide** removes a batch from the pane, **Clear resolved** removes batches where everything is resolved. Neither touches the chat.
 
 ## How it keeps the questions
