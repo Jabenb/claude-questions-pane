@@ -1,10 +1,11 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import { applyReplies, composeAnswers, markSent, parseAsk, rebuild, setDraft } from '../hooks/batch'
 import type { TranscriptMessage } from '../hooks/batch'
 import { languageOf } from '../hooks/i18n'
 import { cutForFork, lastMarker, parseJournal, replay, serialize } from '../hooks/journal'
 import type { Change, Entry } from '../hooks/journal'
+import { outcomeOf, webPage } from '../hooks/web'
 
 const RU = { options: { language: 'ru' } }
 
@@ -754,4 +755,85 @@ test('once a day the files of chats already removed and untouched for 30 days ar
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
   expect(held.runs.filter(argv => argv[0] === 'find')).toHaveLength(2)
   expect(held.files.has(gone)).toBe(true)
+})
+
+test('a press on the browser page comes to the changes the buttons of the pane make', async () => {
+  const batch = parseAsk(ASK, 1)!
+  const sent = markSent(setDraft([batch], '1.1', 'В нашей БД'))
+
+  expect(outcomeOf({ type: 'draft', id: '1.2', text: 'да' }, [batch])).toEqual({ changes: [{ op: 'draft', id: '1.2', text: 'да' }], send: null })
+  expect(outcomeOf({ type: 'send', drafts: { '1.1': 'В нашей БД', '1.2': '', '9.9': 'x' } }, [batch])).toEqual({ changes: [{ op: 'draft', id: '1.1', text: 'В нашей БД' }], send: {} })
+  expect(outcomeOf({ type: 'send', only: '1', drafts: {} }, [batch])).toEqual({ changes: [], send: { only: '1' } })
+  expect(outcomeOf({ type: 'hide', batchId: '1' }, [batch])).toEqual({ changes: [{ op: 'hide', batchId: '1' }], send: null })
+  expect(outcomeOf({ type: 'draft', id: '1.1', text: 'поздно' }, sent).changes).toEqual([])
+})
+
+test('a press naming nothing the pane holds comes to nothing', async () => {
+  const batch = parseAsk(ASK, 1)!
+
+  expect(outcomeOf({ type: 'send', only: '7', drafts: { '1.1': 'x' } }, [batch])).toEqual({ changes: [], send: null })
+  expect(outcomeOf({ type: 'hide', batchId: '7' }, [batch]).changes).toEqual([])
+  expect(outcomeOf({ type: 'resolve', id: '1.1' }, [batch]).changes).toEqual([{ op: 'resolve', id: '1.1' }])
+  expect(outcomeOf({ type: 'reopen', id: '1.1' }, [batch]).changes).toEqual([])
+  expect(outcomeOf({ type: 'launch' }, [batch])).toEqual({ changes: [], send: null })
+  expect(outcomeOf(null, [batch])).toEqual({ changes: [], send: null })
+})
+
+test('the browser page carries its language and no markup from its texts', async () => {
+  expect(webPage('ru')).toMatch(/<html lang="ru">/)
+  expect(webPage('ru')).toMatch(/const FALLBACK = "ru"/)
+  expect(webPage('en')).toMatch(/"sendAll":"Send all answers"/)
+  expect(webPage('en')).toMatch(/"sendAll":"Отправить все ответы"/)
+  expect(webPage('en')).toMatch(/"sendAll":"Надіслати всі відповіді"/)
+  expect(webPage('en')).toMatch(/<script src="\/hub\.js"><\/script>/)
+  expect(webPage('en')).not.toMatch(/href="\/"/)
+})
+
+type HubCalls = { pages: number; pushed: Array<{ batches: Array<{ questions: Array<{ id: string; draft: string; status: string }> }> }>; queue: unknown[][] }
+
+/** The `webhub` mod's noun, held in memory: `queue` is what the page's presses hand to each pull. */
+const hub = (on: Parameters<Parameters<typeof test>[1]>[1]): HubCalls => {
+  const held: HubCalls = { pages: 0, pushed: [], queue: [] }
+  on('engine.create', async (_, e, next) => ({
+    ...(await next(e)),
+    webhub: {
+      page: async () => {
+        held.pages += 1
+
+        return { isUp: true, url: 'http://localhost:7777/p/questions/s' }
+      },
+      push: async ({ state }: { state: unknown }) => {
+        held.pushed.push(state as HubCalls['pushed'][number])
+
+        return { isUp: true }
+      },
+      pull: async () => ({ isUp: true, isStale: false, isRegistered: true, actions: (held.queue.shift() ?? []).map((data, index) => ({ id: index + 1, data })) }),
+    },
+  }))
+  return held
+}
+
+test('with the hub mod loaded the pane is mirrored to the browser page and answers sent from there reach Claude', RU, async ($, on) => {
+  const submitted: string[] = []
+  engine(on, submitted)
+  started(on)
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: OWN }))
+  on('env.get', () => ({ value: undefined }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.write', () => ({ value: undefined }))
+  on('store.get', () => ({ value: 100 * DAY }))
+  const held = hub(on)
+  const clock = mock.clock(on, { now: 100 * DAY })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  expect(held.pages).toBe(1)
+
+  await $.tool.call(ASK)
+  expect(held.pushed.at(-1)?.batches[0]?.questions.map(question => question.id)).toEqual(['1.1', '1.2'])
+
+  held.queue.push([{ type: 'send', drafts: { '1.2': 'да, 3 попытки' } }])
+  await clock.advance(1000)
+
+  expect(submitted[0]).toMatch(/\*\*\[1\.2\] Q2\. Нужен ли retry\?\*\*\n→ да, 3 попытки/)
+  expect(held.pushed.at(-1)?.batches[0]?.questions.map(question => question.status)).toEqual(['open', 'sent'])
 })

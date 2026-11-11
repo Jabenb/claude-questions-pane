@@ -7,6 +7,7 @@ import type { Language, Texts } from './i18n'
 import { applyReplies, awaitingReply, batchText, composeAnswers, parseAsk, parseReplies, pending, rebuild, replyFooter, replyReminder } from './batch'
 import { applyChange, COMPACT_AT, cutForFork, lastMarker, marker, parseJournal, replay, serialize } from './journal'
 import type { Change, Entry, PaneState } from './journal'
+import { outcomeOf, WEB_MOD, webPage, webState } from './web'
 
 const PANE = 'questions'
 const COMMAND = 'questions'
@@ -42,6 +43,27 @@ const serial = <T,>(work: () => Promise<T>): Promise<T> => {
   queue = run.catch(() => undefined)
 
   return run
+}
+
+/** One load of this module: the hub hands the page's actions to the newest one only. */
+const LISTENER = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+const PULL_WAIT_MS = 5000
+const HUB_RETRY_MS = 15_000
+
+/** The browser page on the hub: its address once registered, and where the listening stands. */
+let web = { url: '', isAbsent: false, isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
+
+/** Shows the pane's state on the browser page; without the hub mod, or with the hub down, it does nothing. */
+const pushWeb = async ($: EngineInterface, state: PaneState): Promise<void> => {
+  if (web.url === '') {
+    return
+  }
+
+  try {
+    await $.webhub.push({ mod: WEB_MOD, state: webState(state) })
+  } catch {
+    return
+  }
 }
 
 const readPane = async ($: EngineInterface): Promise<PaneState> => ({
@@ -81,6 +103,7 @@ const dispatch = ($: EngineInterface, change: Change): Promise<{ state: PaneStat
     const state = applyChange(await readPane($), change)
     await writePane($, state)
     const seq = await persist($, change, state)
+    await pushWeb($, state)
 
     return { state, mark: seq === null || journal === null ? '' : marker(journal.sessionId, seq) }
   })
@@ -143,6 +166,68 @@ const copyOut = async ($: EngineInterface, texts: Texts, surface: RenderSurface,
 const fold = async ($: EngineInterface, batchId: string): Promise<void> => {
   await commit($)
   await dispatch($, { op: 'fold', batchId })
+}
+
+/**
+ * Registers the page on the hub and shows the pane's state there; again after the hub lost it.
+ * `$.webhub` is the `webhub` mod's noun: without that mod the call throws, and the pane works alone from then on.
+ */
+const openWeb = async ($: EngineInterface, language: Language): Promise<void> => {
+  try {
+    const page = await $.webhub.page({ mod: WEB_MOD, title: TEXTS[language].paneTitle, html: webPage(language) })
+    web = { ...web, url: page.isUp ? page.url : '', downSince: page.isUp ? 0 : Date.now() }
+  } catch {
+    web = { ...web, url: '', isAbsent: true }
+
+    return
+  }
+
+  await pushWeb($, await readPane($))
+}
+
+/** One round of listening to the page: waits a few seconds for what the person pressed there and applies it as the pane's own buttons would. */
+const listenWeb = async ($: EngineInterface, language: Language): Promise<void> => {
+  const now = Date.now()
+
+  if (web.isAbsent || web.isStale || (web.pullingSince !== 0 && now - web.pullingSince < PULL_WAIT_MS + 10_000) || (web.downSince !== 0 && now - web.downSince < HUB_RETRY_MS)) {
+    return
+  }
+
+  web.pullingSince = now
+
+  try {
+    const pulled = await $.webhub.pull({ mod: WEB_MOD, listener: LISTENER, isFirst: web.isFirstPull, waitMs: PULL_WAIT_MS })
+    web.isStale = pulled.isStale
+    web.downSince = pulled.isUp ? 0 : Date.now()
+
+    if (!pulled.isUp || pulled.isStale) {
+      return
+    }
+
+    web.isFirstPull = false
+
+    if (web.url === '' || pulled.isRegistered === false) {
+      await openWeb($, language)
+    }
+
+    for (const action of pulled.actions) {
+      const outcome = outcomeOf(action.data, await read($, batches))
+
+      for (const change of outcome.changes) {
+        if (change.op === 'draft') {
+          typing.delete(change.id)
+        }
+
+        await dispatch($, change)
+      }
+
+      if (outcome.send !== null) {
+        await send($, language, outcome.send.only)
+      }
+    }
+  } finally {
+    web.pullingSince = 0
+  }
 }
 
 const readText = async ($: EngineInterface, path: string): Promise<string> => {
@@ -267,6 +352,7 @@ const lookOf = (question: Question, texts: Texts): Look => {
 export const register: Register = (on, options) => {
   const language = languageOf(options.language)
   journal = null
+  web = { url: '', isAbsent: false, isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
   const texts = TEXTS[language]
 
   on('session.start', async ($, e, next) => {
@@ -326,6 +412,12 @@ export const register: Register = (on, options) => {
 
     await open($)
     await sweep($)
+
+    await openWeb($, language)
+
+    if (!web.isAbsent) {
+      $.clock.every(1000, () => void listenWeb($, language).catch(() => undefined))
+    }
 
     if ((await read($, batches)).some(batch => batch.questions.some(question => question.status !== 'resolved'))) {
       void openPane($, texts)
@@ -408,7 +500,7 @@ export const register: Register = (on, options) => {
     const list: Batch[] = await read($, batches)
     const folded = await read($, collapsed)
     const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
+    const { Box, Text, Button, Link } = ui
     const Input = e.surface === 'mobile' || !('Input' in ui) ? null : ui.Input
     const all = list.flatMap(batch => batch.questions)
     const waiting = pending(list).length
@@ -533,7 +625,10 @@ export const register: Register = (on, options) => {
         })}
         {Input === null && <Text size="footnote" dimColor>{texts.noInput}</Text>}
         <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap="sm" paddingTop="sm">
-          <Text size="footnote" dimColor>{texts.footer(waiting, resolved, all.length)}</Text>
+          <Box flexDirection="row" alignItems="center" columnGap="sm">
+            <Text size="footnote" dimColor>{texts.footer(waiting, resolved, all.length)}</Text>
+            {web.url !== '' && <Link href={web.url} label={texts.openInBrowser} />}
+          </Box>
           <Box flexDirection="row" columnGap="sm">
             {resolved > 0 && <Button key="clear" variant="secondary" dimColor label={texts.clearResolved} onPress={() => void dispatch($, { op: 'clear' })} />}
             <Button key="send" variant="primary" dimColor={waiting === 0} label={texts.sendAll(waiting)} onPress={() => void send($, language)} />
