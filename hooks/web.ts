@@ -517,15 +517,21 @@ const SCRIPT = `
     if (event.key === 'Enter') { event.preventDefault(); focusCard(question.id, true) }
   })
 
+  const shapeOf = batches => JSON.stringify(batches.map(batch => [batch.id, batch.questions.map(question => [question.id, question.status, question.thread.length, question.options.length])]))
+  let shape = ''
+
   hub.onState(next => {
     state = next && Array.isArray(next.batches) ? next : { batches: [] }
+    const nextShape = shapeOf(state.batches)
+    const isReshaped = nextShape !== shape
+    shape = nextShape
     const open = new Map(all().filter(question => question.status === 'open').map(question => [question.id, question]))
     for (const [id, text] of [...local]) {
       const question = open.get(id)
       if (question === undefined || (question.draft === text && document.activeElement !== el('ans-' + id))) local.delete(id)
     }
     if (sel !== 'all' && !state.batches.some(batch => batch.id === sel)) sel = 'all'
-    smoothly(draw)
+    if (isReshaped) smoothly(draw); else draw()
     drawn = true
   })
   hub.onOnline(next => { online = next; patch(el('conn'), connHtml()) })
@@ -755,6 +761,9 @@ const STYLE = `
   @keyframes qpToast { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
   ::view-transition-old(root) { animation: none; display: none; }
   ::view-transition-new(root) { animation: none; }
+  ::view-transition-group(top) { z-index: 100; animation: none; }
+  ::view-transition-old(top) { display: none; }
+  ::view-transition-new(top) { animation: none; }
   ::view-transition-group(*) { animation-duration: .32s; animation-timing-function: cubic-bezier(.2,.7,.3,1); }
   ::view-transition-old(*), ::view-transition-new(*) { animation-duration: .22s; }
   ::view-transition-new(*):only-child { animation: qpIn .3s cubic-bezier(.2,.7,.3,1); }
@@ -774,7 +783,7 @@ export const webPage = (language: Language): string => {
   return [
     `<!doctype html><html lang="${language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`,
     `<title>${WEB_TEXTS[language].title} · Claude</title>${FONTS}<style>${STYLE}</style></head><body>`,
-    `<header class="top"><div class="top-in"><div class="brand"><div class="logo">${ICON.logo}</div><div class="brand-text"><h1 id="title"></h1><span class="sub" id="subtitle"></span></div></div>`,
+    `<header class="top" style="view-transition-name: top"><div class="top-in"><div class="brand"><div class="logo">${ICON.logo}</div><div class="brand-text"><h1 id="title"></h1><span class="sub" id="subtitle"></span></div></div>`,
     `<div class="search">${ICON.search}<input class="field" id="search" type="search" autocomplete="off"></div><span class="conn" id="conn" role="status"></span></div></header>`,
     '<div class="layout"><nav class="side nav-col" id="nav"></nav>',
     '<main class="main-col"><div class="filters" id="filters" role="tablist"></div><div class="list" id="list"></div></main>',
