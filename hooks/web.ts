@@ -129,6 +129,8 @@ const SCRIPT = `
     return true
   })
 
+  const vt = (prefix, id) => ' style="view-transition-name:' + prefix + '-' + String(id).split('.').join('-') + '"'
+
   const removable = () => state.batches.filter(batch => batch.questions.every(question => question.status === 'resolved')).length
 
   const navHtml = () => {
@@ -136,7 +138,7 @@ const SCRIPT = `
     const questions = all()
     const resolvedBatches = removable()
     let html = '<div class="nav-group"><span class="eyebrow">' + esc(t.batches) + '</span>' +
-      '<button class="nav-item nav-all" data-act="sel" data-batch="all" aria-current="' + (sel === 'all') + '">' + SVG.list +
+      '<button class="nav-item nav-all" data-key="nav-all" data-act="sel" data-batch="all" aria-current="' + (sel === 'all') + '">' + SVG.list +
       '<span class="grow strong">' + esc(t.allQuestions) + '</span><span class="mono dim">' + questions.length + '</span></button>'
     for (const batch of state.batches) {
       const counts = countOf(batch.questions)
@@ -148,7 +150,7 @@ const SCRIPT = `
       if (counts.waiting > 0) parts.push('<span><b class="mono warn">…</b>' + counts.waiting + ' ' + esc(t.withClaude) + '</span>')
       parts.push('<span><b class="mono ok">✓</b>' + counts.resolved + '/' + batch.questions.length + ' ' + esc(t.resolvedOf) + '</span>')
       const ready = counts.answered
-      html += '<div class="nav-card' + (current ? ' current' : '') + '">' +
+      html += '<div class="nav-card fadein' + (current ? ' current' : '') + '" data-key="nav-' + esc(batch.id) + '">' +
         '<button class="nav-item" data-act="sel" data-batch="' + esc(batch.id) + '" aria-current="' + current + '">' +
         '<span class="nav-title"><span class="mono dim small">#' + esc(batch.id) + '</span><span class="ellipsis strong">' + esc(batch.title) + '</span></span>' +
         '<span class="segs" aria-hidden="true">' + segs + '</span><span class="counts">' + parts.join('') + '</span></button>' +
@@ -156,9 +158,9 @@ const SCRIPT = `
         '<button class="btn-primary sm" data-act="send" data-batch="' + esc(batch.id) + '"' + (ready > 0 ? '' : ' disabled') + ' aria-label="' + esc(t.send + ' #' + batch.id) + '">' +
         SVG.arrow + esc(t.send) + (ready > 0 ? '<span class="badge">' + ready + '</span>' : '') + '</button></div></div>'
     }
-    html += '<button class="ghost clear" data-act="clear"' + (resolvedBatches > 0 ? '' : ' disabled') + '>' + SVG.trash + esc(t.clear) + ' · ' + resolvedBatches + '</button></div>'
+    html += '<button class="ghost clear" data-key="clear" data-act="clear"' + (resolvedBatches > 0 ? '' : ' disabled') + '>' + SVG.trash + esc(t.clear) + ' · ' + resolvedBatches + '</button></div>'
     const keys = [[t.kNav, ['J', 'K']], [t.kPick, ['1–9']], [t.kEdit, ['↵']], [t.kLeave, ['Esc']], [t.kSearch, ['/']], [t.kSend, ['Ctrl', '↵']]]
-    html += '<div class="keys"><span class="eyebrow">' + esc(t.keys) + '</span>' + keys.map(([label, list]) =>
+    html += '<div class="keys" data-key="keys"><span class="eyebrow">' + esc(t.keys) + '</span>' + keys.map(([label, list]) =>
       '<div class="key-row"><span>' + esc(label) + '</span><span class="kbds">' + list.map(key => '<kbd>' + key + '</kbd>').join('') + '</span></div>').join('') + '</div>'
     return html
   }
@@ -195,7 +197,7 @@ const SCRIPT = `
     const draft = draftOf(question).trim()
     return '<div class="options" role="group" aria-label="' + esc(T().variants) + '">' + question.options.map((option, index) => {
       const on = draft === option
-      return '<button class="opt" data-act="pick" data-id="' + esc(question.id) + '" data-index="' + index + '" aria-pressed="' + on + '">' +
+      return '<button class="opt" data-key="opt-' + index + '" data-act="pick" data-id="' + esc(question.id) + '" data-index="' + index + '" aria-pressed="' + on + '">' +
         '<span class="opt-key mono">' + (on ? SVG.check : index + 1) + '</span><span class="opt-label">' + esc(option) + '</span></button>'
     }).join('') + '</div>'
   }
@@ -217,7 +219,7 @@ const SCRIPT = `
     const id = esc(question.id)
     if (question.status === 'resolved' && !expanded.has(question.id)) {
       const yours = question.thread.filter(entry => entry.from === 'user').pop()
-      return '<button class="row' + (focusId === question.id ? ' focused' : '') + '" id="card-' + id + '" data-act="toggle" data-id="' + id + '" aria-label="' + esc(t.expand + ' ' + question.id) + '">' +
+      return '<button class="row fadein' + (focusId === question.id ? ' focused' : '') + '" id="card-' + id + '"' + vt('q', question.id) + ' data-act="toggle" data-id="' + id + '" aria-label="' + esc(t.expand + ' ' + question.id) + '">' +
         '<span class="row-check">' + SVG.check + '</span><span class="mono faint small">' + id + '</span>' +
         '<span class="row-text ellipsis">' + esc(question.text) + '</span>' +
         (yours ? '<span class="row-answer ellipsis">' + esc(yours.text) + '</span>' : '') + SVG.down + '</button>'
@@ -228,7 +230,7 @@ const SCRIPT = `
         '<div class="msg-body"><span class="msg-name">' + (isClaude ? 'Claude' : esc(t.you)) + '</span><div class="bubble">' + esc(entry.text) + '</div></div></li>'
     }).join('') + (question.status === 'sent'
       ? '<li class="msg from-claude typing"><span class="avatar" aria-hidden="true">' + SVG.claude + '</span><span class="bubble muted">' + DOTS + esc(t.typing) + '</span></li>' : '')
-    return '<article class="' + cardClass(question) + '" id="card-' + id + '" data-id="' + id + '" tabindex="0" aria-label="' + esc(question.id) + '">' +
+    return '<article class="' + cardClass(question) + '" id="card-' + id + '"' + vt('q', question.id) + ' data-id="' + id + '" tabindex="0" aria-label="' + esc(question.id) + '">' +
       '<div class="card-top" id="top-' + id + '">' + topHtml(question) + '</div>' +
       '<p class="q-text">' + esc(question.text) + '</p>' +
       (thread !== '' ? '<ol class="thread">' + thread + '</ol>' : '') +
@@ -249,7 +251,7 @@ const SCRIPT = `
       shown.forEach(question => order.push(question.id))
       const counts = countOf(batch.questions)
       const id = esc(batch.id)
-      return '<section class="batch fadein" aria-label="' + esc(batch.title) + '"><div class="batch-head"><div class="batch-name">' +
+      return '<section class="batch fadein" id="batch-' + id + '" aria-label="' + esc(batch.title) + '"><div class="batch-head"' + vt('b', batch.id) + '><div class="batch-name">' +
         '<h2>' + esc(batch.title) + '</h2><span class="meta"><span class="mono">#' + id + '</span> · ' + esc(fill(t.batchMeta, { total: batch.questions.length, resolved: counts.resolved })) + '</span></div>' +
         '<div class="batch-actions">' +
         '<button class="ghost" data-act="copy" data-batch="' + id + '">' + (copied === batch.id ? '<span class="ok">' + SVG.check + esc(t.copied) + '</span>' : SVG.copy + esc(t.copy)) + '</button>' +
@@ -259,7 +261,7 @@ const SCRIPT = `
     }).join('')
     if (sections !== '') return sections
     const nothing = all().length === 0
-    return '<div class="empty fadein"><div class="empty-icon">' + SVG.done + '</div><h2>' + esc(nothing ? t.emptyTitle : t.noMatchTitle) + '</h2><p>' + esc(nothing ? t.emptyHint : t.noMatchHint) + '</p></div>'
+    return '<div class="empty fadein" data-key="empty"><div class="empty-icon">' + SVG.done + '</div><h2>' + esc(nothing ? t.emptyTitle : t.noMatchTitle) + '</h2><p>' + esc(nothing ? t.emptyHint : t.noMatchHint) + '</p></div>'
   }
 
   const outboxHtml = () => {
@@ -269,10 +271,10 @@ const SCRIPT = `
     let html = '<div class="out-head"><h3 class="eyebrow">' + esc(t.outbox) + '</h3><span class="count mono">' + ready + '</span></div>'
     if (groups.length === 0) return html + '<p class="out-empty">' + esc(t.outboxEmpty) + '</p>'
     html += groups.map(({ batch, items }) =>
-      '<section class="out-group fadein" aria-label="' + esc(batch.title) + '"><div class="out-group-head"><span class="mono dim small">#' + esc(batch.id) + '</span>' +
+      '<section class="out-group fadein" data-key="out-' + esc(batch.id) + '" aria-label="' + esc(batch.title) + '"><div class="out-group-head"><span class="mono dim small">#' + esc(batch.id) + '</span>' +
       '<span class="grow ellipsis strong small">' + esc(batch.title) + '</span>' +
       '<button class="btn-primary sm" data-act="send" data-batch="' + esc(batch.id) + '" aria-label="' + esc(t.send + ' #' + batch.id) + '">' + SVG.arrow + esc(t.send) + '<span class="badge">' + items.length + '</span></button></div>' +
-      '<ul>' + items.map(question => '<li><span class="ellipsis dim"><span class="mono faint">[' + esc(question.id) + ']</span> ' + esc(question.text) + '</span><span class="out-answer">→ ' + esc(draftOf(question).trim()) + '</span></li>').join('') + '</ul></section>').join('')
+      '<ul>' + items.map(question => '<li class="fadein" data-key="out-' + esc(question.id) + '"><span class="ellipsis dim"><span class="mono faint">[' + esc(question.id) + ']</span> ' + esc(question.text) + '</span><span class="out-answer">→ ' + esc(draftOf(question).trim()) + '</span></li>').join('') + '</ul></section>').join('')
     if (groups.length > 1) html += '<button class="btn-primary wide" data-act="sendAll">' + SVG.arrow + esc(t.sendAll) + ' · ' + ready + '</button>'
     return html
   }
@@ -296,20 +298,68 @@ const SCRIPT = `
     el('outbox').setAttribute('aria-label', t.outbox)
   }
 
-  const side = () => {
-    el('nav').innerHTML = navHtml()
-    el('filters').innerHTML = filtersHtml()
-    el('outbox').innerHTML = outboxHtml()
-    el('conn').innerHTML = connHtml()
+  const keyOf = node => (node.nodeType === 1 ? node.id || node.getAttribute('data-key') || null : null)
+
+  const morph = (from, to) => {
+    for (const { name } of [...from.attributes]) if (!to.hasAttribute(name)) from.removeAttribute(name)
+    for (const { name, value } of [...to.attributes]) if (from.getAttribute(name) !== value) from.setAttribute(name, value)
+    if (from.tagName === 'TEXTAREA') {
+      if (document.activeElement !== from && from.value !== to.value) from.value = to.value
+      return
+    }
+    morphChildren(from, to)
   }
 
+  const morphChildren = (from, to) => {
+    const keyed = new Map()
+    for (const child of from.childNodes) { const key = keyOf(child); if (key !== null) keyed.set(key, child) }
+    let cursor = from.firstChild
+    for (const next of [...to.childNodes]) {
+      const key = keyOf(next)
+      let match = key !== null ? keyed.get(key) || null
+        : cursor !== null && keyOf(cursor) === null && cursor.nodeType === next.nodeType ? cursor : null
+      if (match !== null && match.nodeType === 1 && match.tagName !== next.tagName) match = null
+      if (match === null) { from.insertBefore(next, cursor); continue }
+      if (key !== null) keyed.delete(key)
+      if (match === cursor) cursor = cursor.nextSibling; else from.insertBefore(match, cursor)
+      if (match.nodeType === 1) morph(match, next)
+      else if (match.nodeValue !== next.nodeValue) match.nodeValue = next.nodeValue
+    }
+    while (cursor !== null) { const after = cursor.nextSibling; from.removeChild(cursor); cursor = after }
+  }
+
+  const patch = (node, html) => {
+    if (node === null) return
+    const fresh = document.createElement(node.tagName)
+    fresh.innerHTML = html
+    morphChildren(node, fresh)
+  }
+
+  const calm = matchMedia('(prefers-reduced-motion: reduce)')
+  const smoothly = change => {
+    const typing = document.activeElement !== null && (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT')
+    if (typeof document.startViewTransition !== 'function' || calm.matches || typing || document.hidden || !drawn) { change(); return }
+    let isDone = false
+    const once = () => { if (!isDone) { isDone = true; change() } }
+    try { document.startViewTransition(once) } catch { once() }
+    setTimeout(once, 250)
+  }
+
+  const side = () => {
+    patch(el('nav'), navHtml())
+    patch(el('filters'), filtersHtml())
+    patch(el('outbox'), outboxHtml())
+    patch(el('conn'), connHtml())
+  }
+
+  let drawn = false
   const draw = () => {
     const active = document.activeElement
     const kept = active !== null && active.id !== '' && active.id !== 'search'
       ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null
     statics()
     side()
-    el('list').innerHTML = listHtml()
+    patch(el('list'), listHtml())
     if (kept !== null) {
       const again = el(kept.id)
       if (again !== null) {
@@ -324,11 +374,10 @@ const SCRIPT = `
     if (question === undefined) return
     const card = el('card-' + id)
     if (card !== null && card.tagName === 'ARTICLE') {
-      card.className = cardClass(question).replace(' fadein', '')
-      el('top-' + id).innerHTML = topHtml(question)
-      el('opts-' + id).innerHTML = optionsHtml(question)
-      const preview = el('prev-' + id)
-      if (preview !== null) preview.innerHTML = previewHtml(question)
+      card.className = cardClass(question)
+      patch(el('top-' + id), topHtml(question))
+      patch(el('opts-' + id), optionsHtml(question))
+      patch(el('prev-' + id), previewHtml(question))
     }
     side()
   }
@@ -406,8 +455,8 @@ const SCRIPT = `
     const button = event.target.closest('[data-act]')
     if (button === null || button.disabled) return
     const { act: name, id, batch, index, key } = button.dataset
-    if (name === 'sel') { sel = batch; draw() }
-    if (name === 'filter') { filter = key; draw() }
+    if (name === 'sel') { sel = batch; smoothly(draw) }
+    if (name === 'filter') { filter = key; smoothly(draw) }
     if (name === 'send') void send(batch)
     if (name === 'sendAll') void send(undefined)
     if (name === 'copy') copyBatch(batch)
@@ -419,8 +468,7 @@ const SCRIPT = `
     if (name === 'toggle') {
       if (expanded.has(id)) expanded.delete(id); else expanded.add(id)
       focusId = id
-      draw()
-      focusCard(id, false)
+      smoothly(() => { draw(); focusCard(id, false) })
     }
   })
 
@@ -430,7 +478,7 @@ const SCRIPT = `
   })
 
   document.addEventListener('input', event => {
-    if (event.target.id === 'search') { query = event.target.value.trim().toLowerCase(); el('list').innerHTML = listHtml(); return }
+    if (event.target.id === 'search') { query = event.target.value.trim().toLowerCase(); patch(el('list'), listHtml()); return }
     if (event.target.tagName !== 'TEXTAREA') return
     local.set(event.target.dataset.id, event.target.value)
     refresh(event.target.dataset.id)
@@ -477,9 +525,10 @@ const SCRIPT = `
       if (question === undefined || (question.draft === text && document.activeElement !== el('ans-' + id))) local.delete(id)
     }
     if (sel !== 'all' && !state.batches.some(batch => batch.id === sel)) sel = 'all'
-    draw()
+    smoothly(draw)
+    drawn = true
   })
-  hub.onOnline(next => { online = next; el('conn').innerHTML = connHtml() })
+  hub.onOnline(next => { online = next; patch(el('conn'), connHtml()) })
   hub.onDelivered(ids => {
     const delivered = ids.filter(id => sending.has(id))
     if (delivered.length === 0) return
@@ -604,7 +653,9 @@ const STYLE = `
   .nav-card .nav-item { border-radius: 11px 11px 0 0; padding: 11px 12px 8px; flex-direction: column; align-items: stretch; gap: 8px; }
   .nav-title { display: flex; align-items: center; gap: 8px; }
   .segs { display: flex; gap: 2px; height: 4px; }
-  .segs span { flex-basis: 0; border-radius: 2px; transition: flex-grow .5s cubic-bezier(.2,.7,.3,1); }
+  .segs { transform-origin: left center; animation: qpGrow .7s cubic-bezier(.2,.7,.3,1); }
+  .segs span { flex-basis: 0; border-radius: 2px; transition: flex-grow .6s cubic-bezier(.2,.7,.3,1), background-color .3s; }
+  @keyframes qpGrow { from { transform: scaleX(0); opacity: .4; } to { transform: none; opacity: 1; } }
   .counts { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; color: var(--muted); }
   .counts span { display: inline-flex; align-items: center; gap: 4px; }
   .counts b { font-weight: 400; }
@@ -702,7 +753,15 @@ const STYLE = `
   @keyframes qpIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 10; background: var(--toast); color: var(--toast-fg); border-radius: 12px; padding: 10px 16px; font-size: 13.5px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,.25); max-width: calc(100vw - 32px); animation: qpToast .3s cubic-bezier(.2,.7,.3,1); }
   @keyframes qpToast { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
-  @media (prefers-reduced-motion: reduce) { .fadein, .toast, .dots i { animation: none; } }
+  ::view-transition-old(root) { animation: none; display: none; }
+  ::view-transition-new(root) { animation: none; }
+  ::view-transition-group(*) { animation-duration: .32s; animation-timing-function: cubic-bezier(.2,.7,.3,1); }
+  ::view-transition-old(*), ::view-transition-new(*) { animation-duration: .22s; }
+  ::view-transition-new(*):only-child { animation: qpIn .3s cubic-bezier(.2,.7,.3,1); }
+  ::view-transition-old(*):only-child { animation: qpOut .18s ease-in forwards; }
+  @keyframes qpOut { to { opacity: 0; transform: scale(.98); } }
+  .counts span, .nav-foot > span, .pill, .opt, .opt-key, .btn-primary .badge { transition: color .2s, background-color .2s, border-color .2s; }
+  @media (prefers-reduced-motion: reduce) { .fadein, .toast, .dots i, .segs { animation: none; } .segs span { transition: none; } }
 `
 
 const FONTS =
