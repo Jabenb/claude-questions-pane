@@ -1,15 +1,13 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderSurface } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
-import type { Batch, Question } from '../types'
 import { languageOf, TEXTS } from './i18n'
-import type { Language, Texts } from './i18n'
-import { applyReplies, awaitingReply, batchText, composeAnswers, parseAsk, parseReplies, pending, rebuild, replyFooter, replyReminder } from './batch'
+import type { Language } from './i18n'
+import { applyReplies, awaitingReply, composeAnswers, parseAsk, parseReplies, rebuild, replyFooter, replyReminder } from './batch'
 import { applyChange, COMPACT_AT, cutForFork, lastMarker, marker, parseJournal, replay, serialize } from './journal'
 import type { Change, Entry, PaneState } from './journal'
 import { outcomeOf, WEB_MOD, webPage, webState } from './web'
 
-const PANE = 'questions'
 const COMMAND = 'questions'
 const ASK = 'mcp__questions__ask'
 const REPLY = 'mcp__questions__reply'
@@ -17,20 +15,14 @@ const REPLY = 'mcp__questions__reply'
 const batches = atom({ plugin: 'questions', key: 'batches' } as const, [], { shape: 'batches-1' })
 /** Only grows: a hidden batch's number is never given again, so its ids in the chat history stay its own. */
 const lastBatchNo = atom({ plugin: 'questions', key: 'lastBatchNo' } as const, 0)
-/** Ids of the batches folded down to their header. */
+/** Ids of folded batches: kept for the files of earlier versions, the page does not fold. */
 const collapsed = atom({ plugin: 'questions', key: 'collapsed' } as const, [])
 
 const GUIDE = [
-  '# Questions pane',
-  `When you need the user to decide more than two things (implementation questions, open points of a feature, clarifications), do not write them as a numbered list in chat: call ${ASK} with all of them, each with its options when there are obvious ones, then end your turn with one short line saying the questions are in the pane. Keep each question self-contained: it is read alone, next to its own answer field.`,
-  `The user's answers arrive as one message where every answer sits under its question, tagged with its id like [1.3]. Reply to every answered id with ${REPLY} before the turn ends, not only the ones you discuss in chat: a question stays unresolved in the pane until it gets your reply. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided, or when your reply asks the user something back; when that follow-up has obvious answers, pass them as the reply's options (they replace the question's old buttons). In chat, never refer to a question by its bare number: open each point with the question's short title and quote the user's answer, e.g. "**Q3 · Where to keep the lead** — you: «in our DB» → …".`,
+  '# Questions page',
+  `When you need the user to decide more than two things (implementation questions, open points of a feature, clarifications), do not write them as a numbered list in chat: call ${ASK} with all of them, each with its options when there are obvious ones, then end your turn with one short line saying the questions are on the questions page in the browser. Keep each question self-contained: it is read alone, next to its own answer field.`,
+  `The user's answers arrive as one message where every answer sits under its question, tagged with its id like [1.3]. Reply to every answered id with ${REPLY} before the turn ends, not only the ones you discuss in chat: a question stays unresolved on the page until it gets your reply. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided, or when your reply asks the user something back; when that follow-up has obvious answers, pass them as the reply's options (they replace the question's old buttons). In chat, never refer to a question by its bare number: open each point with the question's short title and quote the user's answer, e.g. "**Q3 · Where to keep the lead** — you: «in our DB» → …".`,
 ].join('\n\n')
-
-const openPane = ($: EngineInterface, texts: Texts, isFocused = false): Promise<unknown> =>
-  $.ui.open(isFocused ? { id: PANE, title: texts.paneTitle, focus: true } : { id: PANE, title: texts.paneTitle })
-
-/** What is typed stays out of state until the field loses focus: a state write per key redraws the pane under the cursor. */
-const typing = new Map<string, string>()
 
 /** This session's file, known from `session.start` on; null until then (and under a test that starts no session). */
 let journal: { sessionId: string; dir: string; path: string; text: string; seq: number; count: number } | null = null
@@ -50,10 +42,10 @@ const LISTENER = `${Date.now()}-${Math.random().toString(36).slice(2)}`
 const PULL_WAIT_MS = 5000
 const HUB_RETRY_MS = 15_000
 
-/** The browser page on the hub: its address once registered, and where the listening stands. */
-let web = { url: '', isAbsent: false, isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
+/** The page on the hub: its address once registered, and where the listening stands. */
+let web = { url: '', isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
 
-/** Shows the pane's state on the browser page; without the hub mod, or with the hub down, it does nothing. */
+/** Shows the state on the page; with the hub down it does nothing, and the page is registered again once the hub is back. */
 const pushWeb = async ($: EngineInterface, state: PaneState): Promise<void> => {
   if (web.url === '') {
     return
@@ -108,34 +100,7 @@ const dispatch = ($: EngineInterface, change: Change): Promise<{ state: PaneStat
     return { state, mark: seq === null || journal === null ? '' : marker(journal.sessionId, seq) }
   })
 
-const commit = async ($: EngineInterface): Promise<void> => {
-  const typed = [...typing]
-
-  for (const [id, text] of typed) {
-    const question = (await read($, batches)).flatMap(batch => batch.questions).find(one => one.id === id)
-
-    if (question !== undefined && question.draft !== text) {
-      await dispatch($, { op: 'draft', id, text })
-    }
-  }
-
-  typed.forEach(([id, draft]) => typing.get(id) === draft && typing.delete(id))
-}
-
-const hide = async ($: EngineInterface, batchId: string): Promise<void> => {
-  const list = await read($, batches)
-  list.find(batch => batch.id === batchId)?.questions.forEach(question => typing.delete(question.id))
-  await dispatch($, { op: 'hide', batchId })
-}
-
-const pick = async ($: EngineInterface, question: Question, option: string): Promise<void> => {
-  typing.delete(question.id)
-  await commit($)
-  await dispatch($, { op: 'draft', id: question.id, text: question.draft === option ? '' : option })
-}
-
 const send = async ($: EngineInterface, language: Language, only?: string): Promise<void> => {
-  await commit($)
   const list = await read($, batches)
   const text = composeAnswers(list, only, language)
 
@@ -150,34 +115,13 @@ const send = async ($: EngineInterface, language: Language, only?: string): Prom
   await $.prompt.submit({ text: `${text}\n\n${mark === '' ? footer : `${footer} ${mark}`}`, asUser: true })
 }
 
-/** Puts a batch, or one question of it, on the clipboard of the surface the press came from; typed drafts are kept first. */
-const copyOut = async ($: EngineInterface, texts: Texts, surface: RenderSurface, batchId: string, questionId?: string): Promise<void> => {
-  await commit($)
-  const batch = (await read($, batches)).find(one => one.id === batchId)
-
-  if (batch === undefined) {
-    return
-  }
-
-  const copied = await $.ui.copy({ text: batchText(batch, texts, questionId), surface })
-  $.ui.toast(copied.isCopied ? texts.copied : texts.copyFailed(copied.reason), { timeoutMs: 2000 })
-}
-
-const fold = async ($: EngineInterface, batchId: string): Promise<void> => {
-  await commit($)
-  await dispatch($, { op: 'fold', batchId })
-}
-
-/**
- * Registers the page on the hub and shows the pane's state there; again after the hub lost it.
- * `$.webhub` is the `webhub` mod's noun: without that mod the call throws, and the pane works alone from then on.
- */
+/** Registers the page on the hub and shows the state there; again after the hub lost it. */
 const openWeb = async ($: EngineInterface, language: Language): Promise<void> => {
   try {
-    const page = await $.webhub.page({ mod: WEB_MOD, title: TEXTS[language].paneTitle, html: webPage(language) })
+    const page = await $.webhub.page({ mod: WEB_MOD, title: TEXTS[language].pageTitle, html: webPage(language), icon: '❓' })
     web = { ...web, url: page.isUp ? page.url : '', downSince: page.isUp ? 0 : Date.now() }
   } catch {
-    web = { ...web, url: '', isAbsent: true }
+    web = { ...web, url: '', downSince: Date.now() }
 
     return
   }
@@ -185,11 +129,11 @@ const openWeb = async ($: EngineInterface, language: Language): Promise<void> =>
   await pushWeb($, await readPane($))
 }
 
-/** One round of listening to the page: waits a few seconds for what the person pressed there and applies it as the pane's own buttons would. */
+/** One round of listening to the page: waits a few seconds for what the person pressed there and applies it. */
 const listenWeb = async ($: EngineInterface, language: Language): Promise<void> => {
   const now = Date.now()
 
-  if (web.isAbsent || web.isStale || (web.pullingSince !== 0 && now - web.pullingSince < PULL_WAIT_MS + 10_000) || (web.downSince !== 0 && now - web.downSince < HUB_RETRY_MS)) {
+  if (web.isStale || (web.pullingSince !== 0 && now - web.pullingSince < PULL_WAIT_MS + 10_000) || (web.downSince !== 0 && now - web.downSince < HUB_RETRY_MS)) {
     return
   }
 
@@ -214,10 +158,6 @@ const listenWeb = async ($: EngineInterface, language: Language): Promise<void> 
       const outcome = outcomeOf(action.data, await read($, batches))
 
       for (const change of outcome.changes) {
-        if (change.op === 'draft') {
-          typing.delete(change.id)
-        }
-
         await dispatch($, change)
       }
 
@@ -252,7 +192,7 @@ const parentText = async ($: EngineInterface, dir: string, prefix: string, ownId
 }
 
 /**
- * Opens this session's file and puts the pane in state from the first source that has it: the session's own file
+ * Opens this session's file and puts the questions in state from the first source that has it: the session's own file
  * (a restart or a resume), the state a running session already holds (an update of the mod), the parent's file cut
  * where a fork's history ends, or the chat history itself (sessions from before the files, or a lost file).
  */
@@ -333,34 +273,18 @@ const sweep = async ($: EngineInterface): Promise<void> => {
   }
 }
 
-type Look = { mark: string; color: string; hint: string }
-
-const lookOf = (question: Question, texts: Texts): Look => {
-  if (question.status === 'resolved') {
-    return { mark: '✓', color: 'success', hint: texts.hintResolved }
-  }
-
-  if (question.status === 'sent') {
-    return { mark: '…', color: 'warning', hint: texts.hintWaiting }
-  }
-
-  return question.draft.trim() !== ''
-    ? { mark: '●', color: 'suggestion', hint: texts.hintAnswered }
-    : { mark: '○', color: 'subtle', hint: texts.hintEmpty }
-}
-
 export const register: Register = (on, options) => {
   const language = languageOf(options.language)
   journal = null
-  web = { url: '', isAbsent: false, isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
+  web = { url: '', isFirstPull: true, isStale: false, pullingSince: 0, downSince: 0 }
   const texts = TEXTS[language]
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    await $.command.register({ name: COMMAND, description: 'Open the questions pane' })
+    await $.command.register({ name: COMMAND, description: 'Show the address of the questions page' })
     await $.tool.register({
       name: 'ask',
-      description: 'Show a batch of questions for the user in the Questions pane, each with its own answer field. Use instead of a numbered list in chat whenever you have more than two questions.',
+      description: 'Show a batch of questions for the user on the questions page in the browser, each with its own answer field. Use instead of a numbered list in chat whenever you have more than two questions.',
       isDeferred: false,
       inputSchema: {
         type: 'object',
@@ -383,7 +307,7 @@ export const register: Register = (on, options) => {
     })
     await $.tool.register({
       name: 'reply',
-      description: 'Attach your reply under answered questions in the Questions pane, by question id like "1.3". Every answered id needs one entry: a question without your reply never shows as resolved.',
+      description: 'Attach your reply under answered questions on the questions page, by question id like "1.3". Every answered id needs one entry: a question without your reply never shows as resolved.',
       isDeferred: false,
       inputSchema: {
         type: 'object',
@@ -414,14 +338,7 @@ export const register: Register = (on, options) => {
     await sweep($)
 
     await openWeb($, language)
-
-    if (!web.isAbsent) {
-      $.clock.every(1000, () => void listenWeb($, language).catch(() => undefined))
-    }
-
-    if ((await read($, batches)).some(batch => batch.questions.some(question => question.status !== 'resolved'))) {
-      void openPane($, texts)
-    }
+    $.clock.every(1000, () => void listenWeb($, language).catch(() => undefined))
 
     return result
   })
@@ -432,7 +349,7 @@ export const register: Register = (on, options) => {
     return { sections: [...composed.sections, { id: 'questions:guide', text: GUIDE, scope: 'session' }] }
   })
 
-  /** Rides on every later prompt while answers wait; the pane's own send says it in its text (see `replyFooter`). */
+  /** Rides on every later prompt while answers wait; the page's own send says it in its text (see `replyFooter`). */
   on('prompt.submit', async ($, e, next) => {
     const ids = e.command === undefined ? awaitingReply(await read($, batches)) : []
 
@@ -440,9 +357,11 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: COMMAND }, async $ => {
-    await openPane($, texts)
+    if (web.url === '') {
+      await openWeb($, language)
+    }
 
-    return { text: texts.opened }
+    return { text: web.url === '' ? texts.hubDown : texts.pageAt(web.url) }
   })
 
   on('tool.call', { tool: ASK }, async ($, e) => {
@@ -455,8 +374,8 @@ export const register: Register = (on, options) => {
     }
 
     const { mark } = await dispatch($, { op: 'ask', batch })
-    void openPane($, texts, true)
-    const shown = `${batch.questions.length} questions are shown in the Questions pane (ids ${batch.questions.map(q => q.id).join(', ')}). End your turn now and wait: the answers arrive as one message.`
+    const where = web.url === '' ? 'on the questions page' : `on the questions page (${web.url})`
+    const shown = `${batch.questions.length} questions are shown ${where} (ids ${batch.questions.map(q => q.id).join(', ')}). End your turn now and wait: the answers arrive as one message.`
 
     return { result: mark === '' ? shown : `${shown} ${mark}` }
   })
@@ -466,175 +385,9 @@ export const register: Register = (on, options) => {
     const { unknown } = applyReplies(await read($, batches), replies)
     const { state, mark } = await dispatch($, { op: 'reply', replies })
     const waiting = awaitingReply(state.batches)
-    const shown = unknown.length === 0 ? `${replies.length} replies shown in the pane.` : `Shown; no question with ids ${unknown.join(', ')}.`
+    const shown = unknown.length === 0 ? `${replies.length} replies shown on the page.` : `Shown; no question with ids ${unknown.join(', ')}.`
     const result = waiting.length === 0 ? shown : `${shown} Still without your reply: ${waiting.join(', ')} — reply to each of them too.`
 
     return { result: mark === '' ? result : `${result} ${mark}` }
-  })
-
-  on('ui.focus', { requestId: PANE }, async ($, e, next) => {
-    const moved = await next(e)
-    await commit($)
-
-    return moved
-  })
-
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    const below = await next(e)
-    const { Box, Button } = $.ui.resolve(e)
-
-    return (
-      <Box flexDirection="row" alignItems="center" columnGap="sm">
-        {below}
-        <Button
-          key="questions"
-          plain
-          label="❓"
-          onPress={() => void openPane($, texts, true)}
-        />
-      </Box>
-    )
-  })
-
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const list: Batch[] = await read($, batches)
-    const folded = await read($, collapsed)
-    const ui = $.ui.resolve(e)
-    const { Box, Text, Button, Link } = ui
-    const Input = e.surface === 'mobile' || !('Input' in ui) ? null : ui.Input
-    const all = list.flatMap(batch => batch.questions)
-    const waiting = pending(list).length
-    const resolved = all.filter(question => question.status === 'resolved').length
-
-    if (list.length === 0) {
-      return (
-        <Box flexDirection="column" padding="md" rowGap="sm">
-          <Text size="heading" weight="semibold">{texts.emptyTitle}</Text>
-          <Text dimColor>{texts.emptyHint}</Text>
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column" paddingX="sm" paddingY="sm" rowGap="lg">
-        {list.map(batch => {
-          const isFolded = folded.includes(batch.id)
-          const batchWaiting = pending([batch]).length
-
-          return (
-          <Box key={`b-${batch.id}`} flexDirection="column" rowGap="md">
-            <Box flexDirection="column" rowGap="xs">
-              <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap="sm">
-                <Box flexDirection="row" alignItems="center" columnGap="xs">
-                  <Button key={`fold-${batch.id}`} plain label={isFolded ? '▸' : '▾'} onPress={() => void fold($, batch.id)} />
-                  <Text size="heading" weight="semibold">{batch.title}</Text>
-                </Box>
-                <Box flexDirection="row" alignItems="center" columnGap="sm">
-                  <Button key={`copy-${batch.id}`} plain dimColor label="⧉" onPress={press => void copyOut($, texts, press.surface, batch.id)} />
-                  {batchWaiting > 0 && (
-                    <Button key={`send-${batch.id}`} variant="primary" label={texts.sendBatch(batchWaiting)} onPress={() => void send($, language, batch.id)} />
-                  )}
-                  <Button key={`hide-${batch.id}`} variant="secondary" dimColor label={texts.hide} onPress={() => void hide($, batch.id)} />
-                </Box>
-              </Box>
-              <Text size="footnote" dimColor>
-                {texts.stats(
-                  batch.questions.length,
-                  batch.questions.filter(question => question.status !== 'open' || question.draft.trim() !== '').length,
-                  batch.questions.filter(question => question.status === 'resolved').length,
-                )}
-              </Text>
-            </Box>
-            {!isFolded && batch.questions.map(question => {
-              const look = lookOf(question, texts)
-              const isOpen = question.status === 'open'
-
-              return (
-                <Box
-                  key={`q-${question.id}`}
-                  flexDirection="column"
-                  rowGap="sm"
-                  padding="md"
-                  borderStyle="round"
-                  borderColor={look.color}
-                  borderDimColor={question.status === 'resolved'}
-                >
-                  <Box flexDirection="row" justifyContent="space-between" columnGap="sm">
-                    <Text size="footnote" weight="semibold" color={look.color}>{`${look.mark} Q${question.n}`}</Text>
-                    <Box flexDirection="row" alignItems="center" columnGap="sm">
-                      {question.status === 'resolved' ? (
-                        <Button key={`reopen-${question.id}`} plain dimColor label={texts.reopen} onPress={() => void dispatch($, { op: 'reopen', id: question.id })} />
-                      ) : isOpen && question.thread.length > 0 ? (
-                        <Button
-                          key={`resolve-${question.id}`}
-                          plain
-                          dimColor
-                          label={texts.resolveByHand}
-                          onPress={() => {
-                            typing.delete(question.id)
-                            void dispatch($, { op: 'resolve', id: question.id })
-                          }}
-                        />
-                      ) : (
-                        <Text size="footnote" dimColor>{look.hint}</Text>
-                      )}
-                      <Button key={`copy-${question.id}`} plain dimColor label="⧉" onPress={press => void copyOut($, texts, press.surface, batch.id, question.id)} />
-                    </Box>
-                  </Box>
-                  <Text weight={isOpen ? 'medium' : 'regular'} dimColor={question.status === 'resolved'}>{question.text}</Text>
-                  {question.thread.length > 0 && (
-                    <Box flexDirection="column" rowGap="xs" paddingLeft="sm">
-                      {question.thread.map(entry => (
-                        <Text size="footnote" color={entry.from === 'claude' ? 'claude' : 'text'}>
-                          {`${entry.from === 'user' ? texts.you : 'Claude'}: ${entry.text}`}
-                        </Text>
-                      ))}
-                    </Box>
-                  )}
-                  {isOpen && question.options.length > 0 && (
-                    <Box flexDirection="row" flexWrap="wrap" columnGap="xs" rowGap="xs">
-                      {question.options.map((option, index) => (
-                        <Button
-                          key={`o-${question.id}-${index}`}
-                          variant={question.draft === option ? 'primary' : 'secondary'}
-                          label={question.draft === option ? `✓ ${option}` : option}
-                          onPress={() => void pick($, question, option)}
-                        />
-                      ))}
-                    </Box>
-                  )}
-                  {isOpen && Input !== null && (
-                    <Input
-                      key={`a-${question.id}`}
-                      placeholder={question.options.length > 0 ? texts.ownAnswer : texts.answer}
-                      value={typing.get(question.id) ?? question.draft}
-                      rows={2}
-                      submitLabel="↵"
-                      onInput={value => void typing.set(question.id, value)}
-                      onSubmit={value => {
-                        typing.set(question.id, value)
-                        void commit($)
-                      }}
-                    />
-                  )}
-                </Box>
-              )
-            })}
-          </Box>
-          )
-        })}
-        {Input === null && <Text size="footnote" dimColor>{texts.noInput}</Text>}
-        <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap="sm" paddingTop="sm">
-          <Box flexDirection="row" alignItems="center" columnGap="sm">
-            <Text size="footnote" dimColor>{texts.footer(waiting, resolved, all.length)}</Text>
-            {web.url !== '' && <Link href={web.url} label={texts.openInBrowser} />}
-          </Box>
-          <Box flexDirection="row" columnGap="sm">
-            {resolved > 0 && <Button key="clear" variant="secondary" dimColor label={texts.clearResolved} onPress={() => void dispatch($, { op: 'clear' })} />}
-            <Button key="send" variant="primary" dimColor={waiting === 0} label={texts.sendAll(waiting)} onPress={() => void send($, language)} />
-          </Box>
-        </Box>
-      </Box>
-    )
   })
 }

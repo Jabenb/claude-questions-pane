@@ -6,21 +6,6 @@ import type { Change, PaneState } from './journal'
 /** The page's name on the hub: its address there is `/p/questions/<session>`. */
 export const WEB_MOD = 'questions'
 
-/**
- * The noun the `webhub` mod adds to `$`, as far as this plugin uses it. Declared here and not taken from that mod's
- * contract: the hub is optional, and without it the pane works alone.
- */
-export type Hub = {
-  page: (args: { mod: string; title: string; html: string }) => Promise<{ isUp: boolean; url: string }>
-  push: (args: { mod: string; state: unknown }) => Promise<{ isUp: boolean }>
-  pull: (args: { mod: string; listener: string; isFirst?: boolean; waitMs?: number }) => Promise<{
-    isUp: boolean
-    isStale: boolean
-    isRegistered?: boolean
-    actions: Array<{ id: number; data: unknown }>
-  }>
-}
-
 /** What the page draws from. */
 export type WebState = { batches: Batch[] }
 

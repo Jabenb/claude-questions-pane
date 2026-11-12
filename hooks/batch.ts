@@ -1,6 +1,6 @@
 import type { Batch, Question } from '../types'
 import { ANSWERS_HEADERS, TEXTS } from './i18n'
-import type { Language, Texts } from './i18n'
+import type { Language } from './i18n'
 
 export type Reply = { id: string; text: string; isResolved: boolean; options: string[] }
 
@@ -69,7 +69,7 @@ export const awaitingReply = (batches: Batch[]): string[] =>
   batches.flatMap(batch => batch.questions).filter(question => question.status === 'sent').map(question => question.id)
 
 export const replyReminder = (ids: string[]): string =>
-  `Questions pane: the user answered ${ids.join(', ')} and each still waits for your reply. Before this turn ends, call mcp__questions__reply with one entry for EVERY one of these ids, not only the ones you discuss in chat. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided ("still open", "later", a question back) or when your reply asks the user something back; then give options for your follow-up when it has obvious answers.`
+  `Questions page: the user answered ${ids.join(', ')} and each still waits for your reply. Before this turn ends, call mcp__questions__reply with one entry for EVERY one of these ids, not only the ones you discuss in chat. resolved: true only when the answer is a final decision; resolved: false when the user leaves the point open or undecided ("still open", "later", a question back) or when your reply asks the user something back; then give options for your follow-up when it has obvious answers.`
 
 /** Closes the pane's own message: a plugin's own submit skips its `prompt.submit` hook, so the reminder is said in the text. */
 export const replyFooter = (ids: string[], language: Language = 'en'): string => TEXTS[language].replyFooter(ids.join(', '))
@@ -133,25 +133,6 @@ export const setDraft = (batches: Batch[], id: string, draft: string): Batch[] =
     ...batch,
     questions: batch.questions.map(question => (question.id === id ? { ...question, draft } : question)),
   }))
-
-/** A question as plain text for the clipboard: the whole thread, the options still offered and an unsent draft. */
-export const questionText = (question: Question, texts: Texts): string => {
-  const lines = [`[${question.id}] Q${question.n}. ${question.text}`, ...question.thread.map(entry => `${entry.from === 'user' ? texts.you : 'Claude'}: ${entry.text}`)]
-
-  if (question.status === 'open' && question.options.length > 0) {
-    lines.push(`${texts.optionsLabel}: ${question.options.join(' / ')}`)
-  }
-
-  if (question.draft.trim() !== '') {
-    lines.push(`${texts.draftLabel}: ${question.draft.trim()}`)
-  }
-
-  return lines.join('\n')
-}
-
-/** A batch, or only one of its questions, under the batch's title. */
-export const batchText = (batch: Batch, texts: Texts, questionId?: string): string =>
-  [`«${batch.title}»`, ...batch.questions.filter(question => questionId === undefined || question.id === questionId).map(question => questionText(question, texts))].join('\n\n')
 
 export const dropResolved = (batches: Batch[]): Batch[] =>
   batches.filter(batch => batch.questions.some(question => question.status !== 'resolved'))

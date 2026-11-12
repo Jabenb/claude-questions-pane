@@ -9,28 +9,16 @@ import { outcomeOf, webPage } from '../hooks/web'
 
 const RU = { options: { language: 'ru' } }
 
-const PANE = {
-  plugin: 'questions',
-  component: 'Pane',
-  requestId: 'questions',
-  props: {
-    title: 'Вопросы',
-    isFocused: false,
-    bodyColumns: 60,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
-    view: {},
-  },
-} as const
-
 const ASK = {
   tool: 'mcp__questions__ask',
   title: 'Checkout flow',
   questions: [{ text: 'Где хранить lead?', options: ['В нашей БД', 'Только в CRM'] }, { text: 'Нужен ли retry?' }, { text: '  ' }],
 }
 
+/** A row the session left in the chat, without the marker that ends it. */
+const bare = (text: unknown): string => String(text).replace(/ ‹q:\w+#\d+›$/, '')
+
 const engine = (on: Parameters<Parameters<typeof test>[1]>[1], submitted: string[]): void => {
-  on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)
@@ -67,145 +55,114 @@ test('an unresolved reply opens the question again, unknown ids are reported', a
   expect(unknown).toEqual(['9.9'])
 })
 
-test('a batch the model asks is answered in the pane and sent with the questions quoted', RU, async ($, on) => {
+test('a batch the model asks is answered on the page and sent with the questions quoted', RU, async ($, on) => {
   const submitted: string[] = []
   engine(on, submitted)
+  const page = await live($, on)
 
   const asked = await $.tool.call(ASK)
-  expect(String(asked.result)).toMatch(/1\.1, 1\.2/)
+  expect(String(asked.result)).toMatch(/on the questions page \(http:\/\/localhost:7777\/p\/questions\/s\) \(ids 1\.1, 1\.2\)/)
+  expect(page.questions().map(question => question.status)).toEqual(['open', 'open'])
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
-
-  await ui.press({ key: 'o-1.1-0' })
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('✓ В нашей БД')
-  await ui.input({ key: 'a-1.2', text: 'да', kind: 'change' })
-  expect((await ui.find({ type: 'Button', key: 'send' }))?.props.label).toBe('Отправить все ответы (1)')
-
-  await ui.press({ key: 'send' })
-  expect(submitted).toEqual([
+  await page.press({ type: 'draft', id: '1.1', text: 'В нашей БД' }, { type: 'send', drafts: { '1.2': 'да' } })
+  expect(submitted.map(bare)).toEqual([
     'Ответы из панели вопросов «Checkout flow»:\n\n**[1.1] Q1. Где хранить lead?**\n→ В нашей БД\n\n**[1.2] Q2. Нужен ли retry?**\n→ да\n\n' +
       '_Claude: ответь через mcp__questions__reply на каждый из 1.1, 1.2 — resolved: true, только если ответ окончательный; false — если пункт оставлен открытым или ты переспрашиваешь._',
   ])
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('… Q1')
-  expect(await ui.find({ key: 'a-1.1' })).toBe(undefined)
+  expect(page.questions().map(question => question.status)).toEqual(['sent', 'sent'])
 
   await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Ок, синк джобой' }] })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('✓ Q1')
-  expect((await ui.find({ type: 'Text', text: /синк джобой/ }))?.text).toBe('Claude: Ок, синк джобой')
-
-  await ui.unmount()
+  expect(page.questions()[0]?.status).toBe('resolved')
+  expect(page.questions()[0]?.thread.at(-1)).toEqual({ from: 'claude', text: 'Ок, синк джобой' })
 })
 
 test('answers without a reply ride on every later prompt and in the reply result until each one is replied', RU, async ($, on) => {
   const contexts: (readonly string[] | undefined)[] = []
-  on('ui.open', () => ({ value: { isPlaced: true } }))
   on('prompt.submit', (_, e) => {
     contexts.push(e.context)
 
     return { text: e.text }
   })
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.input({ key: 'a-1.2', text: 'да', kind: 'change' })
-  await ui.press({ key: 'send' })
+  await page.press({ type: 'send', drafts: { '1.1': 'В нашей БД', '1.2': 'да' } })
   expect(contexts[0]).toBe(undefined)
 
   const partial = await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Ок' }] })
-  expect(String(partial.result)).toBe('1 replies shown in the pane. Still without your reply: 1.2 — reply to each of them too.')
+  expect(bare(partial.result)).toBe('1 replies shown on the page. Still without your reply: 1.2 — reply to each of them too.')
 
   await $.prompt.submit({ text: 'а дальше?' })
   expect(contexts[1]?.at(-1)).toMatch(/answered 1\.2 and/)
 
   const rest = await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.2', text: 'Оставил открытым' }] })
-  expect(String(rest.result)).toBe('1 replies shown in the pane.')
-  expect((await ui.find({ type: 'Text', text: /Q2/ }))?.text).toBe('✓ Q2')
+  expect(bare(rest.result)).toBe('1 replies shown on the page.')
+  expect(page.questions()[1]?.status).toBe('resolved')
 
   await $.prompt.submit({ text: 'ок' })
   expect(contexts[2]).toBe(undefined)
-  await ui.unmount()
 })
 
-test('a typed answer is kept in state once the focus leaves the field', RU, async ($, on) => {
+test('a draft typed on the page is kept in state', RU, async ($, on) => {
   engine(on, [])
-  on('ui.focus', () => ({ value: { isFocused: true } }))
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.input({ key: 'a-1.2', text: 'да', kind: 'change' })
-  expect((await ui.find({ type: 'Text', text: /Q2/ }))?.text).toBe('○ Q2')
-
-  await $.ui.focus({ requestId: 'questions', key: 'send' })
-  expect((await ui.find({ type: 'Text', text: /Q2/ }))?.text).toBe('● Q2')
-  expect((await ui.find({ type: 'Button', key: 'send' }))?.props.label).toBe('Отправить все ответы (1)')
-  await ui.unmount()
+  await page.press({ type: 'draft', id: '1.2', text: 'да' })
+  expect(page.questions().map(question => [question.draft, question.status])).toEqual([['', 'open'], ['да', 'open']])
 })
 
 test('a batch is hidden whole, answered or not', RU, async ($, on) => {
   engine(on, [])
+  const page = await live($, on)
   await $.tool.call(ASK)
   await $.tool.call({ ...ASK, title: 'Второй' })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'hide-1' })
-
-  expect(await ui.find({ type: 'Text', text: /Checkout flow/ })).toBe(undefined)
-  expect((await ui.find({ type: 'Text', text: /Второй/ }))?.text).toBe('Второй')
+  await page.press({ type: 'draft', id: '1.1', text: 'В нашей БД' }, { type: 'hide', batchId: '1' })
+  expect(page.batchIds()).toEqual(['2'])
 
   const third = await $.tool.call({ ...ASK, title: 'Третий' })
   expect(String(third.result)).toMatch(/3\.1, 3\.2/)
 
-  await ui.press({ key: 'hide-3' })
+  await page.press({ type: 'hide', batchId: '3' })
   const fourth = await $.tool.call({ ...ASK, title: 'Четвёртый' })
   expect(String(fourth.result)).toMatch(/4\.1, 4\.2/)
-  await ui.unmount()
 })
 
-test('the footer keeps what is beneath and adds the pane icon', RU, async ($, on) => {
+test('the command gives the address of the page, or says the hub does not answer', RU, async ($, on) => {
   engine(on, [])
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
+  await live($, on)
 
-    return <Text>Моды 3/3</Text>
-  })
+  expect((await $.command.run({ command: 'questions', args: '' })).text).toBe('Страница вопросов: http://localhost:7777/p/questions/s')
+})
 
-  const footer = { plugin: 'questions', component: 'SessionMode', surface: 'desktop', props: { modes: [] } } as const
-  const ui = await $.ui.mount(footer)
-  expect((await ui.find({ type: 'Text', text: /Моды/ }))?.text).toBe('Моды 3/3')
-  expect((await ui.find({ type: 'Button', key: 'questions' }))?.props.label).toBe('❓')
-  await ui.press({ key: 'questions' })
-  await ui.unmount()
+test('without the hub the questions are still kept and the command says so', RU, async ($, on) => {
+  engine(on, [])
+  started(on)
+  on('session.messages', () => ({ value: [] }))
+  disk(on)
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const asked = await $.tool.call(ASK)
+  expect(String(asked.result)).toMatch(/shown on the questions page \(ids 1\.1, 1\.2\)/)
+  expect((await $.command.run({ command: 'questions', args: '' })).text).toBe('Хаб webhub не отвечает: страница вопросов сейчас недоступна.')
 })
 
 test('nothing to send is said, not submitted', RU, async ($, on) => {
   const submitted: string[] = []
   engine(on, submitted)
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'send' })
+  await page.press({ type: 'send', drafts: {} })
 
   expect(submitted).toEqual([])
-  await ui.unmount()
 })
 
 test('an empty ask is refused', async $ => {
   const asked = await $.tool.call({ tool: 'mcp__questions__ask', questions: [] })
 
   expect(asked.deny).toMatch(/No questions/)
-})
-
-test('mobile shows the questions without fields', RU, async ($, on) => {
-  engine(on, [])
-  await $.tool.call(ASK)
-
-  const ui = await $.ui.mount({ ...PANE, surface: 'mobile' })
-
-  expect((await ui.find({ type: 'Text', text: /Нужен ли retry/ }))?.text).toBe('Нужен ли retry?')
-  expect((await ui.find({ type: 'Text', text: /поля ввода нет/ }))).toBeDefined()
-  await ui.unmount()
 })
 
 test('the guide is added to the system prompt', RU, async ($, on) => {
@@ -228,12 +185,16 @@ const DAY = 24 * 60 * 60 * 1000
 
 type Disk = { files: Map<string, string>; mtimes: Map<string, number>; runs: string[][]; store: Map<string, unknown>; chats: string[]; now: number; isWritable: boolean }
 
-/** The session's id, clock, files, store and host commands, held in memory. */
-const disk = (on: Parameters<Parameters<typeof test>[1]>[1], sessionId = OWN, files: Record<string, string> = {}): Disk => {
+/** The session's id, clock, files, store and host commands, held in memory; `isClockOwn: false` leaves the clock to `mock.clock`. */
+const disk = (on: Parameters<Parameters<typeof test>[1]>[1], sessionId = OWN, files: Record<string, string> = {}, isClockOwn = true): Disk => {
   const held: Disk = { files: new Map(Object.entries(files)), mtimes: new Map(), runs: [], store: new Map(), chats: [OWN], now: 100 * DAY, isWritable: true }
   on('session.id', () => ({ value: sessionId }))
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
-  on('clock.now', () => ({ value: held.now }))
+
+  if (isClockOwn) {
+    on('clock.now', () => ({ value: held.now }))
+  }
+
   on('fs.exists', (_, e) => ({ value: held.files.has(e.path) }))
   on('fs.read', (_, e) => {
     if (!held.files.has(e.path)) {
@@ -307,7 +268,7 @@ const TRANSCRIPT: TranscriptMessage[] = [
   replied([{ id: '3.1', text: 'Принял' }, { id: '3.2', text: 'Сколько ждать между попытками?', resolved: false }]),
 ]
 
-test('the transcript tells the pane again: asks, answers, replies', async () => {
+test('the transcript tells the questions again: asks, answers, replies', async () => {
   const told = rebuild(TRANSCRIPT)
   const [first, second] = told.batches[0]!.questions
 
@@ -330,22 +291,21 @@ test('a refused ask is skipped and an ask without ids in its result takes the ne
   expect(rebuild([])).toEqual({ batches: [], lastBatchNo: 0 })
 })
 
-test('a session started with an empty pane restores it from the transcript and numbers on from there', RU, async ($, on) => {
+test('a session started with nothing restores the questions from the transcript and numbers on from there', RU, async ($, on) => {
   engine(on, [])
   started(on)
   const held = disk(on)
+  const page = hub(on)
   on('session.messages', () => ({ value: TRANSCRIPT }))
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('✓ Q1')
-  expect((await ui.find({ type: 'Text', text: /Q2/ }))?.text).toBe('○ Q2')
-  expect((await ui.find({ type: 'Text', text: /три попытки/ }))?.text).toBe('Ты: да,\nтри попытки')
+  const shown = page.pushed.at(-1)?.batches[0]?.questions
+  expect(shown?.map(question => question.status)).toEqual(['resolved', 'open'])
+  expect(shown?.[1]?.thread[0]).toEqual({ from: 'user', text: 'да,\nтри попытки' })
 
   const next = await $.tool.call(ASK)
   expect(String(next.result)).toMatch(/ids 4\.1, 4\.2/)
   expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => entry.op)).toEqual(['snapshot', 'ask'])
-  await ui.unmount()
 })
 
 test('a session started with questions in its state does not read the transcript', RU, async ($, on) => {
@@ -353,6 +313,7 @@ test('a session started with questions in its state does not read the transcript
   engine(on, [])
   started(on)
   const held = disk(on)
+  const page = hub(on)
   on('session.messages', () => {
     reads += 1
 
@@ -361,97 +322,65 @@ test('a session started with questions in its state does not read the transcript
   await $.tool.call(ASK)
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(reads).toBe(0)
   expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => entry.op)).toEqual(['snapshot'])
-  expect(await ui.find({ key: 'a-3.1' })).toBe(undefined)
-  expect((await ui.find({ key: 'a-1.1' }))?.type).toBe('Input')
-  await ui.unmount()
+  expect(page.pushed.at(-1)?.batches.flatMap(batch => batch.questions.map(question => question.id))).toEqual(['1.1', '1.2'])
 })
 
-test('a batch is sent alone and folds down to its header', RU, async ($, on) => {
+test('a batch is sent alone and the other keeps its drafts', RU, async ($, on) => {
   const submitted: string[] = []
   engine(on, submitted)
+  const page = await live($, on)
   await $.tool.call(ASK)
   await $.tool.call({ ...ASK, title: 'Второй' })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'o-2.1-1' })
-  expect((await ui.find({ type: 'Button', key: 'send-1' }))?.props.label).toBe('Отправить (1)')
-
-  await ui.press({ key: 'send-2' })
+  await page.press({ type: 'send', only: '2', drafts: { '1.1': 'В нашей БД', '2.1': 'Только в CRM' } })
   expect(submitted[0]).toMatch(/^Ответы из панели вопросов «Второй»:\n\n\*\*\[2\.1\][^\n]*\*\*\n→ Только в CRM\n\n_Claude: .* 2\.1 —/)
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('✓ В нашей БД')
-  expect(await ui.find({ key: 'send-2' })).toBe(undefined)
-
-  await ui.press({ key: 'fold-1' })
-  expect((await ui.find({ type: 'Button', key: 'fold-1' }))?.props.label).toBe('▸')
-  expect(await ui.find({ key: 'o-1.1-0' })).toBe(undefined)
-  expect((await ui.find({ type: 'Button', key: 'send-1' }))?.props.label).toBe('Отправить (1)')
-
-  await ui.press({ key: 'fold-1' })
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('✓ В нашей БД')
-  await ui.unmount()
+  expect(page.questions().map(question => [question.id, question.status, question.draft])).toEqual([
+    ['1.1', 'open', 'В нашей БД'],
+    ['1.2', 'open', ''],
+    ['2.1', 'sent', ''],
+    ['2.2', 'open', ''],
+  ])
 })
 
 test('a resolved question is opened again for a new answer, its thread kept', RU, async ($, on) => {
   const submitted: string[] = []
   engine(on, submitted)
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'send-1' })
+  await page.press({ type: 'send', only: '1', drafts: { '1.1': 'В нашей БД' } })
   await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Принял' }] })
-  expect(await ui.find({ key: 'reopen-1.2' })).toBe(undefined)
+  await page.press({ type: 'reopen', id: '1.2' }, { type: 'reopen', id: '1.1' })
+  expect(page.questions().map(question => question.status)).toEqual(['open', 'open'])
+  expect(page.questions()[0]?.thread.at(-1)).toEqual({ from: 'claude', text: 'Принял' })
 
-  await ui.press({ key: 'reopen-1.1' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
-  expect((await ui.find({ type: 'Text', text: /Принял/ }))?.text).toBe('Claude: Принял')
-
-  await ui.press({ key: 'o-1.1-1' })
-  await ui.press({ key: 'send-1' })
+  await page.press({ type: 'send', only: '1', drafts: { '1.1': 'Только в CRM' } })
   expect(submitted[1]).toMatch(/\*\*\[1\.1\][^\n]*\*\*\n→ Только в CRM/)
-  await ui.unmount()
 })
 
-test('an open question that was discussed is resolved by hand, a fresh one is not offered it', RU, async ($, on) => {
+test('an open question is resolved by hand and takes no answer after that', RU, async ($, on) => {
   engine(on, [])
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'send-1' })
-  await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Принял' }] })
-  await ui.press({ key: 'reopen-1.1' })
-  expect(await ui.find({ key: 'resolve-1.2' })).toBe(undefined)
-
-  await ui.press({ key: 'resolve-1.1' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('✓ Q1')
-  expect((await ui.find({ type: 'Button', key: 'reopen-1.1' }))?.props.label).toBe('↺ переоткрыть')
-  expect(await ui.find({ key: 'a-1.1' })).toBe(undefined)
-  await ui.unmount()
+  await page.press({ type: 'resolve', id: '1.1' }, { type: 'draft', id: '1.1', text: 'поздно' })
+  expect(page.questions().map(question => [question.status, question.draft])).toEqual([['resolved', ''], ['open', '']])
 })
 
-test('english is the default: the pane, the answers message and its footer', async ($, on) => {
+test('english is the default: the answers message and its footer', async ($, on) => {
   const submitted: string[] = []
   engine(on, submitted)
-  on('ui.focus', () => ({ value: { isFocused: true } }))
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.input({ key: 'a-1.2', text: 'yes', kind: 'change' })
-  await $.ui.focus({ requestId: 'questions', key: 'send' })
-  expect((await ui.find({ type: 'Button', key: 'send' }))?.props.label).toBe('Send all answers (1)')
-  expect((await ui.find({ type: 'Button', key: 'hide-1' }))?.props.label).toBe('Hide')
-
-  await ui.press({ key: 'send' })
-  expect(submitted).toEqual([
+  await page.press({ type: 'send', drafts: { '1.2': 'yes' } })
+  expect(submitted.map(bare)).toEqual([
     'Answers from the Questions pane «Checkout flow»:\n\n**[1.2] Q2. Нужен ли retry?**\n→ yes\n\n' +
       '_Claude: reply with mcp__questions__reply to each of 1.2 — resolved: true only when the answer is final; false when the point is left open or you ask back._',
   ])
-  await ui.unmount()
+  expect((await $.command.run({ command: 'questions', args: '' })).text).toBe('Questions page: http://localhost:7777/p/questions/s')
 })
 
 test('the transcript is read whatever language its answers were sent in', async () => {
@@ -484,63 +413,21 @@ test('an unresolved reply brings the options of its follow-up, a resolved one ke
   expect(rebuild([asked('shown (ids 1.1, 1.2)'), replied([{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot'] }])]).batches[0]?.questions[0]?.options).toEqual(['HubSpot'])
 })
 
-test('the buttons of a question follow Claude\'s follow-up', RU, async ($, on) => {
+test('the options of a question follow Claude\'s follow-up', RU, async ($, on) => {
   engine(on, [])
+  const page = await live($, on)
   await $.tool.call(ASK)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'send-1' })
+  await page.press({ type: 'send', only: '1', drafts: { '1.1': 'В нашей БД' } })
   await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot', 'Salesforce', 'Своя'] }] })
-
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('HubSpot')
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-2' }))?.props.label).toBe('Своя')
+  expect(page.questions()[0]?.options).toEqual(['HubSpot', 'Salesforce', 'Своя'])
 
   await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'А зачем?', resolved: false }] })
-  expect(await ui.find({ key: 'o-1.1-0' })).toBe(undefined)
-  expect((await ui.find({ key: 'a-1.1' }))?.type).toBe('Input')
-  await ui.unmount()
+  expect(page.questions()[0]?.options).toEqual([])
+  expect(page.questions()[0]?.status).toBe('open')
 })
 
-test('a question or a whole batch is copied with its thread, options and drafts', RU, async ($, on) => {
-  const copied: string[] = []
-  const toasts: string[] = []
-  let isCopying = true
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('prompt.submit', (_, e) => ({ text: e.text }))
-  on('ui.toast', (_, e) => {
-    toasts.push(e.text)
-
-    return { value: undefined }
-  })
-  on('ui.copy', (_, e) => {
-    copied.push(e.text)
-
-    return { value: isCopying ? { isCopied: true } : { isCopied: false, reason: 'no-clipboard' } }
-  })
-  await $.tool.call(ASK)
-
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'send-1' })
-  await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Какая CRM?', resolved: false, options: ['HubSpot'] }] })
-  await ui.input({ key: 'a-1.2', text: 'черн', kind: 'change' })
-
-  await ui.press({ key: 'copy-1.1' })
-  await ui.press({ key: 'copy-1' })
-  isCopying = false
-  await ui.press({ key: 'copy-1.2' })
-
-  expect(copied).toEqual([
-    '«Checkout flow»\n\n[1.1] Q1. Где хранить lead?\nТы: В нашей БД\nClaude: Какая CRM?\nВарианты: HubSpot',
-    '«Checkout flow»\n\n[1.1] Q1. Где хранить lead?\nТы: В нашей БД\nClaude: Какая CRM?\nВарианты: HubSpot\n\n[1.2] Q2. Нужен ли retry?\nЧерновик: черн',
-    '«Checkout flow»\n\n[1.2] Q2. Нужен ли retry?\nЧерновик: черн',
-  ])
-  expect(toasts).toEqual(['Скопировано', 'Скопировано', 'Не скопировалось: no-clipboard'])
-  await ui.unmount()
-})
-
-test('a journal replays to the pane it wrote, a broken line skipped', async () => {
+test('a journal replays to the state it wrote, a broken line skipped', async () => {
   const batch = parseAsk(ASK, 1, 'ru')!
   const second = { ...parseAsk(ASK, 2, 'ru')!, title: 'Второй' }
   const text = journalOf([
@@ -590,30 +477,31 @@ test('every change is written to the session file and marks what reaches the cha
   engine(on, submitted)
   started(on)
   on('session.messages', () => ({ value: [] }))
-  const held = disk(on)
+  const held = disk(on, OWN, {}, false)
+  const page = hub(on)
+  const clock = mock.clock(on, { now: held.now })
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
   expect(held.files.has(`${DIR}/${OWN}.jsonl`)).toBe(false)
 
   const asked = await $.tool.call(ASK)
   expect(String(asked.result)).toMatch(/ids 1\.1, 1\.2\)\..* ‹q:aaaaaaaa#1›$/)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'o-1.1-0' })
-  await ui.press({ key: 'send-1' })
+  page.queue.push([{ type: 'draft', id: '1.1', text: 'В нашей БД' }, { type: 'send', only: '1', drafts: {} }])
+  await clock.advance(1000)
   expect(submitted[0]).toMatch(/_Claude: .*_ ‹q:aaaaaaaa#3›$/)
 
   const replied = await $.tool.call({ tool: 'mcp__questions__reply', replies: [{ id: '1.1', text: 'Принял' }] })
-  expect(String(replied.result)).toBe('1 replies shown in the pane. ‹q:aaaaaaaa#4›')
-  await ui.press({ key: 'fold-1' })
-  await ui.press({ key: 'hide-1' })
+  expect(String(replied.result)).toBe('1 replies shown on the page. ‹q:aaaaaaaa#4›')
 
-  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => `${entry.seq}:${entry.op}`)).toEqual(['1:ask', '2:draft', '3:sent', '4:reply', '5:fold', '6:hide'])
-  await ui.unmount()
+  page.queue.push([{ type: 'hide', batchId: '1' }])
+  await clock.advance(1000)
+  expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => `${entry.seq}:${entry.op}`)).toEqual(['1:ask', '2:draft', '3:sent', '4:reply', '5:hide'])
 })
 
-test('a session reopened with its file gets back hidden batches, folds, drafts and statuses set by hand', RU, async ($, on) => {
+test('a session reopened with its file gets back hidden batches, drafts and statuses set by hand', RU, async ($, on) => {
   engine(on, [])
   started(on)
+  const page = hub(on)
   let reads = 0
   on('session.messages', () => {
     reads += 1
@@ -635,14 +523,12 @@ test('a session reopened with its file gets back hidden batches, folds, drafts a
   })
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(reads).toBe(0)
-  expect(await ui.find({ type: 'Text', text: /Checkout flow/ })).toBe(undefined)
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('✓ Q1')
+  expect(page.pushed.at(-1)?.batches.map(batch => batch.id)).toEqual(['2'])
+  expect(page.pushed.at(-1)?.batches[0]?.questions.map(question => question.status)).toEqual(['resolved', 'open'])
 
   const next = await $.tool.call(ASK)
   expect(String(next.result)).toMatch(/ids 3\.1, 3\.2\)\..* ‹q:aaaaaaaa#10›$/)
-  await ui.unmount()
 })
 
 test('a fork starts from the parent file cut at the marker its history ends on', RU, async ($, on) => {
@@ -650,6 +536,7 @@ test('a fork starts from the parent file cut at the marker its history ends on',
   const fork = 'ffffffff-1111-2222-3333-444444444444'
   engine(on, [])
   started(on)
+  const page = hub(on)
   on('session.messages', () => ({ value: [asked('2 questions are shown (ids 1.1, 1.2). ‹q:pppppppp#1›')] }))
   const held = disk(on, fork, {
     [`${DIR}/${parent}.jsonl`]: journalOf([
@@ -660,15 +547,12 @@ test('a fork starts from the parent file cut at the marker its history ends on',
   })
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('● Q1')
-  expect((await ui.find({ type: 'Button', key: 'o-1.1-0' }))?.props.label).toBe('✓ В нашей БД')
+  expect(page.pushed.at(-1)?.batches[0]?.questions[0]).toMatchObject({ status: 'open', draft: 'В нашей БД' })
 
   const own = lines(held.files.get(`${DIR}/${fork}.jsonl`))
   expect(own.map(entry => entry.op)).toEqual(['snapshot'])
   expect(own[0]?.op === 'snapshot' && own[0].from).toEqual({ sessionId: 'pppppppp', seq: 1 })
   expect(lines(held.files.get(`${DIR}/${parent}.jsonl`))).toHaveLength(3)
-  await ui.unmount()
 })
 
 test('a fork whose parent file is gone is told from its history', RU, async ($, on) => {
@@ -676,12 +560,11 @@ test('a fork whose parent file is gone is told from its history', RU, async ($, 
   started(on)
   on('session.messages', () => ({ value: [asked('shown (ids 3.1, 3.2). ‹q:pppppppp#1›')] }))
   const held = disk(on, 'ffffffff-1111-2222-3333-444444444444')
+  const page = hub(on)
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
+  expect(page.pushed.at(-1)?.batches[0]?.questions.map(question => [question.id, question.status])).toEqual([['3.1', 'open'], ['3.2', 'open']])
   expect([...held.files.keys()]).toEqual([`${DIR}/ffffffff-1111-2222-3333-444444444444.jsonl`])
-  await ui.unmount()
 })
 
 test('a session with nothing to restore makes no file until its first change', RU, async ($, on) => {
@@ -713,10 +596,11 @@ test('a long journal is rewritten as one snapshot and keeps counting', RU, async
   expect(lines(held.files.get(`${DIR}/${OWN}.jsonl`)).map(entry => `${entry.seq}:${entry.op}`)).toEqual(['500:snapshot', '501:ask'])
 })
 
-test('a pane whose file cannot be written keeps working from memory', RU, async ($, on) => {
+test('questions whose file cannot be written keep working from memory', RU, async ($, on) => {
   engine(on, [])
   started(on)
   on('session.messages', () => ({ value: [] }))
+  const page = hub(on)
   const held = disk(on)
   held.isWritable = false
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
@@ -724,9 +608,7 @@ test('a pane whose file cannot be written keeps working from memory', RU, async 
   const asked = await $.tool.call(ASK)
   expect(String(asked.result)).toMatch(/wait: the answers arrive as one message\.$/)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Q1/ }))?.text).toBe('○ Q1')
-  await ui.unmount()
+  expect(page.pushed.at(-1)?.batches[0]?.questions.map(question => question.status)).toEqual(['open', 'open'])
 })
 
 test('once a day the files of chats already removed and untouched for 30 days are deleted', RU, async ($, on) => {
@@ -757,7 +639,7 @@ test('once a day the files of chats already removed and untouched for 30 days ar
   expect(held.files.has(gone)).toBe(true)
 })
 
-test('a press on the browser page comes to the changes the buttons of the pane make', async () => {
+test('a press on the page comes to the changes it names', async () => {
   const batch = parseAsk(ASK, 1)!
   const sent = markSent(setDraft([batch], '1.1', 'В нашей БД'))
 
@@ -768,7 +650,7 @@ test('a press on the browser page comes to the changes the buttons of the pane m
   expect(outcomeOf({ type: 'draft', id: '1.1', text: 'поздно' }, sent).changes).toEqual([])
 })
 
-test('a press naming nothing the pane holds comes to nothing', async () => {
+test('a press naming nothing the questions hold comes to nothing', async () => {
   const batch = parseAsk(ASK, 1)!
 
   expect(outcomeOf({ type: 'send', only: '7', drafts: { '1.1': 'x' } }, [batch])).toEqual({ changes: [], send: null })
@@ -789,7 +671,8 @@ test('the browser page carries its language and no markup from its texts', async
   expect(webPage('en')).not.toMatch(/href="\/"/)
 })
 
-type HubCalls = { pages: number; pushed: Array<{ batches: Array<{ questions: Array<{ id: string; draft: string; status: string }> }> }>; queue: unknown[][] }
+type Shown = { id: string; draft: string; status: string; options: string[]; thread: Array<{ from: string; text: string }> }
+type HubCalls = { pages: number; pushed: Array<{ batches: Array<{ id: string; questions: Shown[] }> }>; queue: unknown[][] }
 
 /** The `webhub` mod's noun, held in memory: `queue` is what the page's presses hand to each pull. */
 const hub = (on: Parameters<Parameters<typeof test>[1]>[1]): HubCalls => {
@@ -813,9 +696,10 @@ const hub = (on: Parameters<Parameters<typeof test>[1]>[1]): HubCalls => {
   return held
 }
 
-test('with the hub mod loaded the pane is mirrored to the browser page and answers sent from there reach Claude', RU, async ($, on) => {
-  const submitted: string[] = []
-  engine(on, submitted)
+type Page = { held: HubCalls; press: (...actions: unknown[]) => Promise<void>; questions: () => Shown[]; batchIds: () => string[] }
+
+/** A started session with the hub held in memory: `press` hands the page's actions to the next round of listening. */
+const live = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1]): Promise<Page> => {
   started(on)
   on('session.messages', () => ({ value: [] }))
   on('session.id', () => ({ value: OWN }))
@@ -828,12 +712,13 @@ test('with the hub mod loaded the pane is mirrored to the browser page and answe
   await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
   expect(held.pages).toBe(1)
 
-  await $.tool.call(ASK)
-  expect(held.pushed.at(-1)?.batches[0]?.questions.map(question => question.id)).toEqual(['1.1', '1.2'])
-
-  held.queue.push([{ type: 'send', drafts: { '1.2': 'да, 3 попытки' } }])
-  await clock.advance(1000)
-
-  expect(submitted[0]).toMatch(/\*\*\[1\.2\] Q2\. Нужен ли retry\?\*\*\n→ да, 3 попытки/)
-  expect(held.pushed.at(-1)?.batches[0]?.questions.map(question => question.status)).toEqual(['open', 'sent'])
-})
+  return {
+    held,
+    press: async (...actions) => {
+      held.queue.push(actions)
+      await clock.advance(1000)
+    },
+    questions: () => (held.pushed.at(-1)?.batches ?? []).flatMap(batch => batch.questions),
+    batchIds: () => (held.pushed.at(-1)?.batches ?? []).map(batch => batch.id),
+  }
+}

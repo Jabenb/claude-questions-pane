@@ -1,18 +1,19 @@
 {
   "name": "questions",
-  "version": "0.5.2",
-  "description": "Questions pane: Claude posts its clarifying questions in a side pane, you answer each one in its own field and send them back with every answer under its question",
+  "version": "0.6.0",
+  "description": "Questions page: Claude posts its clarifying questions on a browser page in the webhub hub, you answer each one in its own field and send them back with every answer under its question",
   "author": { "name": "jabenb" },
   "homepage": "https://github.com/jabenb/claude-questions-pane",
   "repository": "https://github.com/jabenb/claude-questions-pane",
   "license": "MIT",
-  "keywords": ["questions", "pane", "clarifications", "mod"],
+  "keywords": ["questions", "clarifications", "webhub", "mod"],
   "types": "./types/index.d.ts",
+  "dependencies": ["webhub@claude-webhub"],
   "userConfig": {
     "language": {
       "type": "string",
       "title": "Language",
-      "description": "Language of the pane and of the answers message it sends: en or ru.",
+      "description": "Language of the answers message the page sends (the page itself follows the hub): en or ru.",
       "default": "en",
       "options": ["en", "ru"]
     }

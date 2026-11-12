@@ -1,99 +1,34 @@
 export type Language = 'en' | 'ru'
 
 export type Texts = {
-  paneTitle: string
-  opened: string
+  pageTitle: string
+  pageAt: (url: string) => string
+  hubDown: string
   nothingToSend: string
-  emptyTitle: string
-  emptyHint: string
   defaultBatchTitle: (batchNo: number) => string
+  /** Kept as worded since the first version: the transcript of an older session is read by it. */
   answersHeader: string
   replyFooter: (ids: string) => string
-  stats: (total: number, answered: number, resolved: number) => string
-  sendBatch: (count: number) => string
-  sendAll: (count: number) => string
-  hide: string
-  clearResolved: string
-  reopen: string
-  resolveByHand: string
-  hintResolved: string
-  hintWaiting: string
-  hintAnswered: string
-  hintEmpty: string
-  you: string
-  ownAnswer: string
-  answer: string
-  noInput: string
-  footer: (waiting: number, resolved: number, total: number) => string
-  copied: string
-  copyFailed: (reason: string) => string
-  optionsLabel: string
-  draftLabel: string
-  openInBrowser: string
 }
 
 export const TEXTS: Record<Language, Texts> = {
   en: {
-    paneTitle: 'Questions',
-    opened: 'Questions pane opened.',
+    pageTitle: 'Questions',
+    pageAt: url => `Questions page: ${url}`,
+    hubDown: 'The webhub hub does not answer: the questions page is not available now.',
     nothingToSend: 'No answers to send',
-    emptyTitle: 'No questions yet',
-    emptyHint: 'Claude posts its questions here, each with its own answer field.',
     defaultBatchTitle: batchNo => `Questions ${batchNo}`,
     answersHeader: 'Answers from the Questions pane «',
     replyFooter: ids => `_Claude: reply with mcp__questions__reply to each of ${ids} — resolved: true only when the answer is final; false when the point is left open or you ask back._`,
-    stats: (total, answered, resolved) => `${total} questions · answered ${answered} · resolved ${resolved}`,
-    sendBatch: count => `Send (${count})`,
-    sendAll: count => `Send all answers (${count})`,
-    hide: 'Hide',
-    clearResolved: 'Clear resolved',
-    reopen: '↺ reopen',
-    resolveByHand: '✓ resolved',
-    hintResolved: 'resolved',
-    hintWaiting: 'waiting for Claude',
-    hintAnswered: 'answered',
-    hintEmpty: 'no answer',
-    you: 'You',
-    ownAnswer: 'Or your own answer…',
-    answer: 'Your answer…',
-    noInput: 'No input fields on this device: answer from a computer.',
-    footer: (waiting, resolved, total) => `ready to send: ${waiting} · resolved ${resolved}/${total}`,
-    copied: 'Copied',
-    copyFailed: reason => `Not copied: ${reason}`,
-    optionsLabel: 'Options',
-    draftLabel: 'Draft',
-    openInBrowser: 'Open in browser ↗',
   },
   ru: {
-    paneTitle: 'Вопросы',
-    opened: 'Панель вопросов открыта.',
+    pageTitle: 'Вопросы',
+    pageAt: url => `Страница вопросов: ${url}`,
+    hubDown: 'Хаб webhub не отвечает: страница вопросов сейчас недоступна.',
     nothingToSend: 'Нет ответов для отправки',
-    emptyTitle: 'Вопросов пока нет',
-    emptyHint: 'Claude выложит сюда вопросы по фиче: каждый со своим полем ответа.',
     defaultBatchTitle: batchNo => `Вопросы ${batchNo}`,
     answersHeader: 'Ответы из панели вопросов «',
     replyFooter: ids => `_Claude: ответь через mcp__questions__reply на каждый из ${ids} — resolved: true, только если ответ окончательный; false — если пункт оставлен открытым или ты переспрашиваешь._`,
-    stats: (total, answered, resolved) => `${total} вопр. · с ответом ${answered} · решено ${resolved}`,
-    sendBatch: count => `Отправить (${count})`,
-    sendAll: count => `Отправить все ответы (${count})`,
-    hide: 'Скрыть',
-    clearResolved: 'Убрать решённые',
-    reopen: '↺ переоткрыть',
-    resolveByHand: '✓ решено',
-    hintResolved: 'решён',
-    hintWaiting: 'ждёт Claude',
-    hintAnswered: 'есть ответ',
-    hintEmpty: 'без ответа',
-    you: 'Ты',
-    ownAnswer: 'Или свой ответ…',
-    answer: 'Твой ответ…',
-    noInput: 'На этом устройстве поля ввода нет: отвечай с компьютера.',
-    footer: (waiting, resolved, total) => `готово к отправке: ${waiting} · решено ${resolved}/${total}`,
-    copied: 'Скопировано',
-    copyFailed: reason => `Не скопировалось: ${reason}`,
-    optionsLabel: 'Варианты',
-    draftLabel: 'Черновик',
-    openInBrowser: 'Открыть в браузере ↗',
   },
 }
 

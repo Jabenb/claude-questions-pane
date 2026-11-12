@@ -5,7 +5,8 @@
     {
       "name": "questions",
       "source": "./",
-      "description": "Questions pane: answer Claude's clarifying questions one by one, each in its own field"
+      "description": "Questions page: answer Claude's clarifying questions one by one on a browser page in the webhub hub"
     }
-  ]
+  ],
+  "allowCrossMarketplaceDependenciesOn": ["claude-webhub"]
 }
