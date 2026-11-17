@@ -173,6 +173,17 @@ test('the guide is added to the system prompt', RU, async ($, on) => {
   expect(composed.sections.map(section => section.id)).toEqual(['intro', 'questions:guide'])
 })
 
+test('the guide asks an interview skill in rounds on the page', RU, async ($, on) => {
+  on('prompt.compose', () => ({ sections: [] }))
+
+  const composed = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] })
+  const guide = composed.sections.find(section => section.id === 'questions:guide')?.text ?? ''
+
+  expect(guide).toMatch(/\/grill-me/)
+  expect(guide).toMatch(/even a round of one question/)
+  expect(guide).toMatch(/until the user confirms the brief/)
+})
+
 const started = (on: Parameters<Parameters<typeof test>[1]>[1]): void => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }))
