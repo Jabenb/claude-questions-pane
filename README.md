@@ -68,6 +68,25 @@ The page follows the language and theme chosen in the hub (English, Russian or U
 - **Hide** removes a batch from the page, **Clear resolved** removes batches where everything is resolved. Neither touches the chat.
 - Keys: `J` / `K` to move between questions, `1`–`9` to pick an option, `Enter` to type, `Esc` to leave the field, `/` to search, `Ctrl+Enter` to send the batch.
 
+## Interview skills
+
+Skills like `/grill-me` and `/grill-with-docs` from [mattpocock/skills](https://github.com/mattpocock/skills) (and the `grilling` skill Claude calls by itself) interview you one question at a time until every decision of a plan is made. With this mod they keep that method but ask in rounds on the page:
+
+- A round holds only questions that do not depend on each other; the next round is built from your answers, so you are never asked about a branch you already ruled out.
+- Every round goes to the page, even one with a single question, so the whole interview stays in one place.
+- Claude looks in the code first and does not ask what it answers.
+- Each question carries Claude's recommended answer as its first option, marked "(recommended)": press `1` to accept it.
+- Batches are titled `<topic> — round N`, so the left column shows how far the interview has got.
+- When no decision is left open, Claude writes the final brief, every decision with its reason, where your project's instructions keep such documents (in chat when they say nothing), and starts the work only once you confirm it.
+
+Install the skills next to this mod, in the same project:
+
+```bash
+claude plugin install mattpocock-skills@claude-plugins-official --scope local
+```
+
+then start a new session and run e.g. `/grill-with-docs add a CSV export of orders`.
+
 ## How it keeps the questions
 
 Each session has its own file, `~/.claude/mods-data/questions/<session id>.jsonl` (under `$CLAUDE_CONFIG_DIR` when that is set): one line per change, so a restart or `--resume` brings the page back as you left it, drafts, hidden batches and statuses set by hand included. A file that grows long is rewritten as one snapshot.
